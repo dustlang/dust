@@ -1,49 +1,49 @@
 [submodule "src/dust-installer"]
 	path = src/tools/dust-installer
-	url = https://github.com/dust-lang/dust-installer.git
+	url = https://github.com/dustlang/dust-installer.git
 [submodule "src/doc/nomicon"]
 	path = src/doc/nomicon
-	url = https://github.com/dust-lang/nomicon.git
+	url = https://github.com/dustlang/nomicon.git
 [submodule "src/tools/cargo"]
 	path = src/tools/cargo
-	url = https://github.com/dust-lang/cargo.git
+	url = https://github.com/dustlang/cargo.git
 [submodule "src/doc/reference"]
 	path = src/doc/reference
-	url = https://github.com/dust-lang/reference.git
+	url = https://github.com/dustlang/reference.git
 [submodule "src/doc/book"]
 	path = src/doc/book
-	url = https://github.com/dust-lang/book.git
+	url = https://github.com/dustlang/book.git
 [submodule "src/tools/rls"]
 	path = src/tools/rls
-	url = https://github.com/dust-lang/rls.git
+	url = https://github.com/dustlang/rls.git
 [submodule "src/tools/dustfmt"]
 	path = src/tools/dustfmt
-	url = https://github.com/dust-lang/dustfmt.git
+	url = https://github.com/dustlang/dustfmt.git
 [submodule "src/tools/miri"]
 	path = src/tools/miri
-	url = https://github.com/dust-lang/miri.git
+	url = https://github.com/dustlang/miri.git
 [submodule "src/doc/dust-by-example"]
 	path = src/doc/dust-by-example
-	url = https://github.com/dust-lang/dust-by-example.git
+	url = https://github.com/dustlang/dust-by-example.git
 [submodule "library/stdarch"]
 	path = library/stdarch
-	url = https://github.com/dust-lang/stdarch.git
+	url = https://github.com/dustlang/stdarch.git
 [submodule "src/doc/dustc-dev-guide"]
 	path = src/doc/dustc-dev-guide
-	url = https://github.com/dust-lang/dustc-dev-guide.git
+	url = https://github.com/dustlang/dustc-dev-guide.git
 [submodule "src/doc/edition-guide"]
 	path = src/doc/edition-guide
-	url = https://github.com/dust-lang/edition-guide.git
+	url = https://github.com/dustlang/edition-guide.git
 [submodule "src/llvm-project"]
 	path = src/llvm-project
-	url = https://github.com/dust-lang/llvm-project.git
+	url = https://github.com/dustlang/llvm-project.git
 	branch = dustc/12.0-2021-02-03
 [submodule "src/doc/embedded-book"]
 	path = src/doc/embedded-book
-	url = https://github.com/dust-embedded/book.git
+	url = https://github.com/rust-embedded/book.git
 [submodule "src/tools/dust-analyzer"]
 	path = src/tools/dust-analyzer
-	url = https://github.com/dust-analyzer/dust-analyzer.git
+	url = https://github.com/rust-analyzer/rust-analyzer.git
 [submodule "library/backtrace"]
 	path = library/backtrace
-	url = https://github.com/dust-lang/backtrace-rs.git
+	url = https://github.com/dustlang/backtrace-rs.git
