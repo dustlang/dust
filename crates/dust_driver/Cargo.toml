@@ -1,0 +1,17 @@
+[package]
+name = "dust"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "dust"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+
+dust_frontend = { path = "../dust_frontend" }
+dust_semantics = { path = "../dust_semantics" }
+dust_dir = { path = "../dust_dir" }
+dust_codegen = { path = "../dust_codegen" }
