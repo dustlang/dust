@@ -1,0 +1,7 @@
+[package]
+name = "dust_codegen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dust_dir = { path = "../dust_dir" }
