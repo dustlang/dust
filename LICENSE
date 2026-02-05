@@ -1,0 +1,198 @@
+Dust Open Source License (DOSL)
+
+Version 1.0
+
+Copyright © 2026 Dust LLC
+All rights reserved.
+
+⸻
+
+Plain-Language Summary (Non-Binding)
+
+This license lets you freely use, study, modify, and share software released by Dust LLC, including for commercial purposes.
+
+In exchange, it sets a few clear expectations:
+	•	You must always keep “Copyright © Dust LLC” visible in source code and in materials that ship with binaries.
+	•	You may not claim ownership of Dust LLC’s name, trademarks, patents, or original work.
+	•	You may not imply that Dust LLC endorses or supports your project.
+	•	The software is provided as-is, without warranty or support.
+	•	If something goes wrong, Dust LLC is not responsible for damages.
+
+This summary is here to help humans understand the intent.
+The legally binding terms begin below.
+
+⸻
+
+1. Purpose
+
+The Dust Open Source License (“License”) is intended to encourage open use, experimentation, and collaboration around software released by Dust LLC, while clearly defining ownership, attribution, and responsibility.
+
+This License allows broad freedom to use, modify, and distribute the Software, with the understanding that:
+	•	Dust LLC provides the Software without warranties, guarantees, or support;
+	•	responsibility for using the Software rests entirely with the user;
+	•	Dust LLC retains full ownership of its intellectual property;
+	•	attribution to Dust LLC must always be preserved.
+
+This License is designed to be permissive, clear, and fair to all parties.
+
+⸻
+
+2. Definitions
+
+“Licensor” means Dust LLC.
+
+“Software” means any source code, object code, binaries, documentation, specifications, or related materials made available by the Licensor under this License.
+
+“You” or “Your” means any individual or legal entity exercising rights under this License.
+
+“Derived Work” means any work that is based on, incorporates, modifies, adapts, translates, compiles, links to, or is otherwise derived from the Software, in whole or in part, whether in source or binary form.
+
+⸻
+
+3. Grant of Rights
+
+Subject to the terms of this License, the Licensor grants You a worldwide, royalty-free, non-exclusive, perpetual license to:
+	•	use the Software for any purpose;
+	•	copy and reproduce the Software;
+	•	modify the Software;
+	•	create Derived Works;
+	•	distribute the Software and Derived Works in source or binary form;
+	•	sublicense the Software and Derived Works under terms of Your choosing.
+
+These rights are granted provided that You comply with all requirements of this License.
+
+⸻
+
+4. Mandatory Attribution
+
+4.1 Required Copyright Notice
+
+All distributions of the Software or any Derived Work, whether in source form or binary form, must prominently display the following notice:
+
+Copyright © Dust LLC
+
+This notice must be:
+	•	preserved in source code headers where such headers exist;
+	•	included in documentation or legal notices accompanying binary distributions;
+	•	included in “About,” “Legal,” or equivalent attribution materials where such materials are provided.
+
+You may not remove, obscure, or alter this notice.
+
+⸻
+
+4.2 Additional Notices
+
+You may add Your own copyright notices for Your contributions, provided that such notices do not remove, replace, or diminish the Dust LLC notice.
+
+⸻
+
+5. Intellectual Property Ownership
+
+5.1 Copyright
+
+This License does not transfer ownership of any copyright.
+
+All copyrights in the Software remain the property of Dust LLC or their respective owners.
+
+⸻
+
+5.2 Patents
+
+This License does not grant any express or implied license to any patents or patent claims held by Dust LLC, except to the limited extent necessary to use the unmodified Software as distributed.
+
+No patent rights are granted for:
+	•	modifications to the Software;
+	•	combinations with other systems;
+	•	downstream products;
+	•	physical devices or hardware;
+	•	research, experimental, or commercial outcomes derived from use of the Software.
+
+⸻
+
+5.3 Trademarks
+
+This License does not grant permission to use any trademarks, service marks, logos, or branding of Dust LLC, including but not limited to names associated with the Software.
+
+The only permitted use of such names is for the purpose of satisfying the attribution requirements of this License.
+
+⸻
+
+6. No Endorsement
+
+Nothing in this License grants permission to suggest or imply that Dust LLC endorses, sponsors, or supports any Derived Work, product, service, or organization.
+
+⸻
+
+7. No Warranty
+
+The Software is provided “as is.”
+
+Dust LLC makes no warranties or promises of any kind, whether express, implied, or statutory, including but not limited to warranties of:
+	•	merchantability;
+	•	fitness for a particular purpose;
+	•	non-infringement;
+	•	accuracy;
+	•	reliability;
+	•	security;
+	•	or correctness.
+
+You assume all risks associated with using the Software.
+
+⸻
+
+8. No Support or Maintenance
+
+Dust LLC has no obligation to provide:
+	•	support;
+	•	maintenance;
+	•	updates;
+	•	bug fixes;
+	•	documentation;
+	•	compatibility assurances.
+
+Any support that may be offered is provided at Dust LLC’s discretion and does not create an ongoing obligation.
+
+⸻
+
+9. Limitation of Liability
+
+To the maximum extent permitted by law, Dust LLC and its contributors shall not be liable for any damages arising from or related to the Software or this License, including but not limited to:
+	•	direct or indirect damages;
+	•	incidental or consequential damages;
+	•	loss of data, profits, or business opportunity;
+	•	system failure or downtime;
+	•	physical, financial, or economic loss.
+
+This limitation applies regardless of the legal theory under which liability is claimed, even if Dust LLC has been advised of the possibility of such damages.
+
+⸻
+
+10. Termination
+
+If You fail to comply with the terms of this License, the rights granted to You automatically terminate.
+
+Upon termination, You must cease distribution of the Software and any Derived Works that do not comply with this License.
+
+⸻
+
+11. Severability
+
+If any provision of this License is found to be unenforceable, that provision shall be adjusted to the minimum extent necessary to make it enforceable, and the remaining provisions shall remain in effect.
+
+⸻
+
+12. Governing Law
+
+This License shall be governed by and interpreted in accordance with the laws of the jurisdiction in which Dust LLC is organized, without regard to conflict-of-law principles.
+
+⸻
+
+13. Entire Agreement
+
+This License constitutes the complete agreement regarding the Software and supersedes all prior or contemporaneous understandings relating to it.
+
+⸻
+
+END OF TERMS
+
+⸻
