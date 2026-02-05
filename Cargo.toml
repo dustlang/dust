@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/dust_driver",
+    "crates/dust_frontend",
+    "crates/dust_semantics",
+    "crates/dust_dir",
+    "crates/dust_codegen",
+]
+
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Dust Open Source License"
+authors = ["Dust LLC"]
+
+[workspace.dependencies]
+thiserror = "1.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
