@@ -1,13 +1,15 @@
 # .github/workflows/ci.yml
 #
-# CI pipeline for the Dust compiler
+# Continuous Integration for the Dust compiler
 #
-# Goals:
-# - Ensure the Rust workspace builds
-# - Ensure the DPL frontend + semantics work
-# - Ensure we can produce and run a native executable from a .ds file
+# This workflow proves that Dust is a *real compiler*:
+#   DPL (.ds) → native executable → executed successfully
 #
-# This is the *proof point* that Dust is a real compiler, not just a parser.
+# It validates:
+# - Rust workspace builds
+# - DPL frontend + semantics are sound
+# - Codegen + linker produce real binaries
+# - K-regime effects execute deterministically
 
 name: dust-ci
 
@@ -18,8 +20,8 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build-and-test:
-    name: Build & Execute DPL
+  build-and-execute:
+    name: Build & Execute DPL (Linux)
     runs-on: ubuntu-latest
 
     steps:
@@ -46,11 +48,32 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace --verbose
 
-      - name: Build DPL executable (K-regime)
-        run: |
-          cargo run -p dust -- build examples/K/k_hello_world.ds
+      - name: Build k_hello_world
+        run: cargo run -p dust -- build examples/K/k_hello_world.ds
 
-      - name: Run produced executable
+      - name: Run k_hello_world
         run: |
-          ./target/dust/k_hello_world > output.txt
-          grep -q "Hello" output.txt
+          ./target/dust/k_hello_world > out.txt
+          grep -q "Hello, Dust" out.txt
+
+      - name: Build k_multiple_emits
+        run: cargo run -p dust -- build examples/K/k_multiple_emits.ds
+
+      - name: Run k_multiple_emits
+        run: |
+          ./target/dust/k_multiple_emits > out.txt
+          diff -u <(printf "First line\nSecond line\nThird line\n") out.txt
+
+      - name: Build k_empty_main
+        run: cargo run -p dust -- build examples/K/k_empty_main.ds
+
+      - name: Run k_empty_main
+        run: ./target/dust/k_empty_main
+
+      - name: Build k_comment_handling
+        run: cargo run -p dust -- build examples/K/k_comment_handling.ds
+
+      - name: Run k_comment_handling
+        run: |
+          ./target/dust/k_comment_handling > out.txt
+          grep -q "Comments OK" out.txt
