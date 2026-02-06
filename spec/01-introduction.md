@@ -120,11 +120,3 @@ Terms defined in later sections are capitalized when first used and are fully de
 Normative language such as “MUST”, “SHALL”, and “MUST NOT” is used intentionally and should be interpreted strictly.
 
 ---
-
-Proceed to:
-
-➡ **`02-lexical-structure.md`**
-
----
-
-End of Section 1.
