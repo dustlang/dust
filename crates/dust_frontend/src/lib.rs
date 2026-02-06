@@ -4,9 +4,7 @@
 
 pub mod ast;
 pub mod lexer;
+pub mod parser;
 
-pub use lexer::{Lexer, Token, Keyword, LexError, LexErrorKind};
-
-pub fn parse_source(_src: &str) {
-    // TODO: implement lexer + parser
-}
+pub use lexer::{Keyword, LexError, LexErrorKind, Lexer, Token};
+pub use parser::{ParseError, Parser};
