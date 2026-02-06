@@ -1,7 +1,10 @@
 // crates/dust_frontend/src/ast.rs
 //
 // DPL v0.1 AST for the Dust frontend.
-// This file is designed to compile cleanly with the current parser implementation.
+//
+// This AST is intentionally shaped to match the *current* parser implementation in
+// crates/dust_frontend/src/parser.rs (FileAst/ForgeDecl/items as Spanned<Item>,
+// Expr variants used by the parser, etc).
 //
 // © 2026 Dust LLC
 
@@ -85,21 +88,26 @@ pub enum Regime {
 
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// Top-level file + items
+// Top-level file + forge + items
 // ─────────────────────────────────────────────────────────────────────────────
 //
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct File {
-    pub items: Vec<Item>,
+pub struct FileAst {
+    pub forges: Vec<Spanned<ForgeDecl>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForgeDecl {
+    pub name: Ident,
+    pub items: Vec<Spanned<Item>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
-    Forge(Spanned<ForgeDecl>),
-    Shape(Spanned<ShapeDecl>),
-    Proc(Spanned<ProcDecl>),
-    Bind(Spanned<BindDecl>),
+    Shape(ShapeDecl),
+    Proc(ProcDecl),
+    Bind(BindDecl),
 }
 
 //
@@ -107,12 +115,6 @@ pub enum Item {
 // Declarations
 // ─────────────────────────────────────────────────────────────────────────────
 //
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ForgeDecl {
-    pub name: Ident,
-    pub items: Vec<Item>,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapeDecl {
@@ -219,61 +221,13 @@ pub struct IfStmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeRef {
-    Ref(Box<Spanned<TypeRef>>),
-    List(Box<Spanned<TypeRef>>),
-    Fn(Vec<Spanned<TypeRef>>, Box<Spanned<TypeRef>>),
     Named(Ident),
-}
-
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// Expressions
-// ─────────────────────────────────────────────────────────────────────────────
-//
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
-    Literal(Literal),
-    Ident(Ident),
-    Binary(BinaryExpr),
-    Call(CallExpr),
-    Field(FieldExpr),
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum BinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Eq,
-    Neq,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    And,
-    Or,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct BinaryExpr {
-    pub op: Spanned<BinOp>,
-    pub lhs: Box<Spanned<Expr>>,
-    pub rhs: Box<Spanned<Expr>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CallExpr {
-    pub callee: Box<Spanned<Expr>>,
-    pub args: Vec<Spanned<Expr>>,
-    pub call_span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FieldExpr {
-    pub base: Box<Spanned<Expr>>,
-    pub name: Ident,
+    Unit,
+    Bool,
+    I64,
+    U64,
+    F64,
+    String,
 }
 
 //
@@ -284,8 +238,62 @@ pub struct FieldExpr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
-    Int(String),
-    Float(String),
-    Str(String),
+    Unit,
     Bool(bool),
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+    String(String),
+}
+
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// Expressions (must match parser.rs usage)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Literal(Literal),
+    Ident(Ident),
+    Binary(Box<BinaryExpr>),
+    Field(Box<FieldExpr>),
+    Paren(Box<Spanned<Expr>>),
+    Block(Block),
+    Call(Box<CallExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinaryExpr {
+    pub op: BinOp,
+    pub lhs: Spanned<Expr>,
+    pub rhs: Spanned<Expr>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldExpr {
+    pub base: Spanned<Expr>,
+    pub field: Ident,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallExpr {
+    pub callee: Spanned<Expr>,
+    pub args: Vec<Spanned<Expr>>,
 }
