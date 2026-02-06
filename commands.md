@@ -1,145 +1,132 @@
-Here’s a v0.1 CLI design for the dust tool that matches the spec (DIR is canonical, determinism, explicit failures) and keeps the surface small but future-proof.
+# commands.md
 
-Command shape
+This document describes the `dust` CLI for the Dust Programming Language (DPL) toolchain.
 
-dust <command> [options] [--] [args…]
-	•	Default target input: . (current directory) or an explicit file/dir.
-	•	DPL source files are .ds.
-	•	All commands MUST be deterministic given identical inputs and environment assumptions.
+DPL source files use the default extension: **`.ds`**.
 
-⸻
+---
 
-v0.1 core commands
+## `dust check`
 
-1) dust help
+Parse and validate `.ds` input(s) (no code generation).
 
-Shows global help, command help, and examples.
-	•	dust help
-	•	dust help <command>
+### Usage
 
-2) dust version
+```bash
+dust check <path>
+```
 
-Prints:
-	•	dust version (semver)
-	•	DIR version supported
-	•	spec version targeted (e.g., DPL spec v0.1)
-	•	host triple
+- If `<path>` is a file: it MUST be a `.ds` file.
+- If `<path>` is a directory: all `.ds` files under it are checked.
 
-3) dust check
+### Examples
 
-Parse + validate (syntax, regimes, types, effects, constraints, bindings/contracts) without producing codegen artifacts.
+```bash
+dust check examples/
+dust check examples/K/k_hello_world.ds
+```
 
-Usage
-	•	dust check
-	•	dust check path/to/file.ds
-	•	dust check examples/
+---
 
-Key flags
-	•	--spec v0.1 (default; rejects if unsupported)
-	•	--warn-as-error (treat warnings as errors)
-	•	--format {text,json} (diagnostics format)
-	•	--quiet / -q
-	•	--verbose / -v
+## `dust dir`
 
-Outputs
-	•	diagnostics only
-	•	exit codes (see below)
+Emit canonical DIR (Dust Intermediate Representation) for `.ds` input(s).
 
-4) dust dir
+### Usage
 
-Emit canonical DIR for one or more .ds inputs.
+```bash
+dust dir <path> --out <dir> [--print]
+```
 
-Usage
-	•	dust dir (discovers .ds under current forge/module rules)
-	•	dust dir path/to/file.ds -o out/
-	•	dust dir examples/Φ/phi_*.ds --print
+- Writes one `*.dir.json` per input module to the output directory.
+- `--print` also prints the JSON to stdout.
 
-Key flags
-	•	--emit {dir} (default dir)
-	•	-o, --out <path> (default: target/dir/)
-	•	--print (write DIR to stdout)
-	•	--format {json,text} (pick one canonical in v0.1)
-	•	--stable (default on): guarantees stable ordering in emitted DIR
-	•	--hash (prints content hash of DIR output for reproducibility)
+### Examples
 
-Notes
-	•	dust dir implies dust check first; if check fails, no DIR emitted.
+```bash
+dust dir examples/ --out target/dir
+dust dir examples/K/k_hello_world.ds --out target/dir --print
+```
 
-5) dust build
+---
 
-Builds an artifact from DIR using the selected backend.
+## `dust build`
 
-Usage
-	•	dust build (build default package/forge)
-	•	dust build path/to/file.ds
-	•	dust build --target x86_64-unknown-linux-gnu
+Build a **native executable** from a `.ds` program.
 
-Key flags
-	•	--target <triple> (host default)
-	•	--release (default is debug-ish)
-	•	-o, --out <path> (default: target/<triple>/<profile>/)
-	•	--emit {bin,lib,dir} (default: bin; may also write DIR)
-	•	--backend {llvm,cranelift,interp} (v0.1 default: llvm or “dir-only” if backend not implemented yet)
-	•	--offline (no network; should be the default posture)
+### Usage
 
-Outputs
-	•	binaries and/or libraries plus optional DIR.
-	•	MUST preserve DIR semantics; no observable changes.
+```bash
+dust build <path> [--out <exe-path>]
+```
 
-6) dust run
+- `<path>` may be:
+  - a single `.ds` file, or
+  - a directory containing **exactly one** `.ds` file (v0.1 behavior)
+- `--out` sets the output executable path.
+  - If omitted, the default is: `target/dust/<stem>` (and `.exe` is added on Windows if missing)
 
-Convenience wrapper: build then execute.
+### v0.1 Executable Subset (Current)
 
-Usage
-	•	dust run
-	•	dust run -- <program-args>
+The v0.1 compiler currently produces native executables for a constrained, spec-aligned subset:
 
-Key flags
-	•	all build flags apply
-	•	-- separates tool args from program args
+- Entry point: `K main { ... }`
+- Supported statements in `main`:
+  - ordered `emit "<string>"` effects
+- Q-regime and Φ-regime are not codegen-enabled yet.
 
-Notes
-	•	If runtime is not yet part of v0.1, run can be gated or implemented only for host targets.
+If your program uses unsupported constructs, `dust build` MUST fail deterministically with an explanatory error.
 
-⸻
+### Examples
 
-v0.1 “must-have” global flags
-	•	--spec <version> (default v0.1)
-	•	--color {auto,always,never}
-	•	--format {text,json} (diagnostics)
-	•	-q/-v
-	•	--config <path> (optional; default dust.toml if present)
-	•	--no-config (ignore config)
+```bash
+dust build examples/K/k_hello_world.ds
+./target/dust/k_hello_world
+```
 
-⸻
+```bash
+dust build examples/K/k_multiple_emits.ds --out target/dust/my_program
+./target/dust/my_program
+```
 
-Exit codes (stable)
-	•	0 success
-	•	1 compile-time error (syntax/type/regime/effect/constraint/contract invalid)
-	•	2 usage error (bad CLI args)
-	•	3 internal error (bug)
-	•	4 backend unavailable / unsupported target
-	•	5 artifact I/O failure (permissions, disk, etc.)
+---
 
-(Keep this list short and never reuse meanings.)
+## `dust run`
 
-⸻
+Build then run a `.ds` program.
 
-Reserved for v0.x (not required in v0.1, but names should be protected)
+### Usage
 
-These names should be reserved now so you don’t fragment later:
-	•	dust fmt (formatting)
-	•	dust lint (style + best practices)
-	•	dust test (conformance + examples)
-	•	dust verify (contracts/admissibility audits, proof checks)
-	•	dust doc (spec-linked docs)
-	•	dust clean (remove target/)
+```bash
+dust run <path> -- <args...>
+```
 
-⸻
+- Builds the program using the same rules as `dust build`.
+- Any arguments after `--` are passed to the produced executable.
 
-Defaults that fit your spec philosophy
-	•	dust check is the “truth gate”
-	•	dust dir is the canonical meaning artifact
-	•	dust build is a backend detail downstream of DIR
-	•	dust run is convenience only; never changes semantics
+### Examples
 
+```bash
+dust run examples/K/k_hello_world.ds
+```
+
+```bash
+dust run examples/K/k_hello_world.ds -- --help
+```
+
+---
+
+## Output Layout
+
+Default build outputs:
+
+- Executables: `target/dust/<stem>` (or `target/dust/<stem>.exe` on Windows)
+- DIR (if emitted): `target/dir/*.dir.json`
+
+---
+
+## Notes
+
+- `dust` is the toolchain entrypoint and the authoritative compiler for DPL.
+- The specification is normative and lives in `spec/`.
+- Reference examples live in `examples/`.
