@@ -116,22 +116,17 @@ impl Parser {
     }
 
     fn parse_item(&mut self) -> Result<Spanned<Item>, ParseError> {
-        match &self.peek().node {
-            Token::Keyword(Keyword::Shape) => {
-                let s = self.parse_shape()?;
-                Ok(Spanned::new(Item::Shape(s.node), s.span))
-            }
-            Token::Keyword(Keyword::Proc) => {
-                let p = self.parse_proc()?;
-                Ok(Spanned::new(Item::Proc(p.node), p.span))
-            }
-            Token::Keyword(Keyword::Bind) => {
-                let b = self.parse_bind()?;
-                Ok(Spanned::new(Item::Bind(b.node), b.span))
-            }
-            _ => Err(self.err_here("expected forge item")),
+    match &self.peek().node {
+        Token::Keyword(Keyword::Proc) => {
+            let p = self.parse_proc()?;
+            Ok(Spanned::new(Item::Proc(p.node), p.span))
         }
+        // If you want a better error message than “expected forge item”
+        Token::Keyword(Keyword::Shape) => Err(self.err_here("`shape` is not supported by this parser build")),
+        Token::Keyword(Keyword::Bind) => Err(self.err_here("`bind` is not supported by this parser build")),
+        _ => Err(self.err_here("expected forge item (`proc`)")),
     }
+}
 
     // ─────────────────────────────────────────────────────────────
     // Shorthand proc (NEW)
