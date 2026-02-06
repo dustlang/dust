@@ -42,6 +42,14 @@ jobs:
           ./target/dust/k_hello_world > out.txt
           grep -q "Hello, Dust" out.txt
 
+      - name: Run k_hello_dust
+        run: |
+          set -e
+            ./target/dust/k_hello_world > out2.txt
+            echo "::group::Hello World Output"
+            cat out2.txt
+            echo "::endgroup::"
+
       - name: Build k_multiple_emits
         run: cargo run -p dust -- build examples/K/k_multiple_emits.ds
 
