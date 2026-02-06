@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build_test_check:
+    name: Build + Test + Verify Examples (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo fmt (check)
+        run: cargo fmt --all -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --all --all-features
+
+      - name: Cargo build (release)
+        run: cargo build --release
+
+      # ---- DPL v0.1 example verification ----
+      - name: Verify examples directory exists
+        shell: bash
+        run: |
+          test -d examples || (echo "examples/ missing" && exit 1)
+
+      - name: Run dust check on examples
+        shell: bash
+        run: |
+          # Run the just-built compiler from the workspace.
+          # If your binary crate name is `dust` this will work.
+          cargo run --release --bin dust -- check examples
+
+      - name: Emit DIR for examples
+        shell: bash
+        run: |
+          rm -rf target/dir-ci
+          cargo run --release --bin dust -- dir examples --out target/dir-ci
+
+      # Optional: verify determinism by emitting twice and diffing.
+      - name: Determinism check (DIR output stable)
+        shell: bash
+        run: |
+          rm -rf target/dir-ci-2
+          cargo run --release --bin dust -- dir examples --out target/dir-ci-2
+
+          # Compare directory trees (best-effort cross-platform).
+          # On Windows bash shell this still works in Actions runners.
+          diff -qr target/dir-ci target/dir-ci-2
