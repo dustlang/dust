@@ -1,7 +1,16 @@
+# crates/dust_codegen/Cargo.toml
+
 [package]
 name = "dust_codegen"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 dust_dir = { path = "../dust_dir" }
+
+cranelift-codegen = "0.110"
+cranelift-frontend = "0.110"
+cranelift-module = "0.110"
+cranelift-object = "0.110"
+target-lexicon = "0.12"
