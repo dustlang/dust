@@ -1,10 +1,8 @@
-<!-- spec/dpl-spec-v0.1.md -->
-
-# Dust Programming Language (DPL)  
+# Dust Programming Language (DPL)
 ## Language Specification v0.1
 
 © 2026 Dust LLC  
-All rights reserved. Licensed under the **Dust Open Source License**.
+Licensed under the Dust Open Source License.
 
 ---
 
@@ -14,8 +12,7 @@ This document defines **version 0.1** of the **Dust Programming Language (DPL)**
 
 - **Status:** Frozen
 - **Audience:** Language implementers, compiler authors, systems engineers
-- **Normativity:** This specification is **normative**.  
-  Any implementation claiming DPL v0.1 conformance MUST follow this document.
+- **Normativity:** This specification is **normative**
 
 If any other document, implementation, example, or commentary conflicts with this specification, **this specification takes precedence**.
 
@@ -35,14 +32,15 @@ DPL v0.1 defines:
 - The **Dust Intermediate Representation (DIR)** as the canonical semantic form
 - Conformance requirements for compilers and tools
 
-DPL v0.1 **does not** require:
+DPL v0.1 does **not** require:
+
 - Native code generation
 - Runtime guarantees beyond semantic validation
 - Performance guarantees
 
 ---
 
-## Design Principles (Non-Exhaustive)
+## Design Principles
 
 DPL is designed to:
 
@@ -50,19 +48,19 @@ DPL is designed to:
 - Make **effects explicit and auditable**
 - Enforce **linearity and irreversibility** where required
 - Allow **constraint satisfaction without execution**
-- Support classical, quantum, and phase computation **in one language**
-- Enable **formal verification and governance**
+- Support classical, quantum, and phase computation in one language
+- Enable formal verification and governance
 
-These principles are expanded in Appendix A.
+Design rationale is expanded in Appendix A.
 
 ---
 
 ## File Organization
 
-The DPL v0.1 specification is split into individual files for clarity and controlled evolution.
+The DPL v0.1 specification is organized into individual files.
 
 ### Front Matter
-- This document (`dpl-spec-v0.1.md`)
+- `dpl-spec-v0.1.md`
 
 ### Core Sections
 1. `01-introduction.md` — Overview and motivation
@@ -94,7 +92,7 @@ The DPL v0.1 specification is split into individual files for clarity and contro
 - **Keywords** appear in lowercase monospace (`proc`, `forge`, `bind`)
 - **Regimes** are written as `K`, `Q`, `Φ`
 - Code examples use the `.ds` extension
-- “MUST”, “SHALL”, “MAY”, “MUST NOT” are used in the RFC 2119 sense
+- “MUST”, “SHALL”, “MAY”, and “MUST NOT” are used in the RFC 2119 sense
 
 ---
 
@@ -105,18 +103,9 @@ The reference compiler for DPL v0.1 is **`dust`**, hosted at:
 https://github.com/dustlang/dust
 
 The compiler is expected to:
+
 - Parse `.ds` files
 - Validate them against this specification
 - Emit canonical DIR
 
 ---
-
-## What Comes Next
-
-Proceed to:
-
-➡ **`01-introduction.md`**
-
----
-
-End of front matter.
