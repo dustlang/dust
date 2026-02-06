@@ -215,7 +215,7 @@ fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
 
         for data_id in string_data_ids {
             let gv = module.declare_data_in_func(data_id, b.func);
-            let addr = b.ins().global_value_addr(ptr_ty, gv);
+            let addr = b.ins().global_value(ptr_ty, gv);
             b.ins().call(puts_ref, &[addr]);
         }
 
