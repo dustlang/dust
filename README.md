@@ -1,3 +1,5 @@
+# README.md
+
 # dust
 
 `dust` is the compiler and toolchain entrypoint for the **Dust Programming Language (DPL)**.
@@ -41,3 +43,36 @@ This subset exists to prove end-to-end correctness:
 ```bash
 cargo run -p dust -- build examples/K/k_hello_world.ds
 ./target/dust/k_hello_world
+```
+
+Expected output:
+
+```text
+Hello, Dust
+```
+
+### More executable smoke tests
+
+```bash
+cargo run -p dust -- build examples/K/k_multiple_emits.ds
+./target/dust/k_multiple_emits
+```
+
+---
+
+## CI Verification
+
+GitHub Actions is used as the primary verification loop when local CI is unavailable.
+
+The CI workflow:
+- builds the workspace
+- runs unit tests
+- compiles `.ds` examples into native executables
+- executes the produced binaries and asserts output
+
+---
+
+## License
+
+Dust Open Source License  
+© 2026 Dust LLC
