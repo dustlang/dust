@@ -19,7 +19,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use cranelift_codegen::ir::{AbiParam, FuncRef, Signature, UserFuncName};
 use cranelift_codegen::isa;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::{DataContext, Linkage, Module};
+use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use dust_dir::{DirProgram, DirProc, DirStmt};
 use std::ffi::OsStr;
@@ -184,7 +184,7 @@ fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
             .declare_data(&name, Linkage::Local, true, false)
             .with_context(|| format!("declare data {}", name))?;
 
-        let mut data_ctx = DataContext::new();
+        let mut data_ctx = DataDescription::new();
         let mut bytes = s.as_bytes().to_vec();
         bytes.push(0); // null terminator
         data_ctx.define(bytes.into_boxed_slice());
