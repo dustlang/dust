@@ -1,7 +1,10 @@
-use anyhow::{anyhow, Result};
+// crates/dust_driver/src/main.rs
+
+use anyhow::{anyhow, bail, Result};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcCommand;
 
 #[derive(Parser)]
 #[command(name = "dust")]
@@ -19,6 +22,7 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+
     /// Emit canonical DIR JSON
     Dir {
         #[arg(default_value = ".")]
@@ -28,15 +32,23 @@ enum Command {
         #[arg(long)]
         print: bool,
     },
-    /// Reserved (not implemented in v0.1 compiler core)
+
+    /// Build a native executable (v0.1 executable subset)
     Build {
+        /// Path to a single .ds file (or a directory containing exactly one .ds)
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Output executable path (default: target/dust/<stem>[.exe])
+        #[arg(short, long)]
+        out: Option<PathBuf>,
     },
-    /// Reserved (not implemented in v0.1 compiler core)
+
+    /// Build then run (v0.1 executable subset)
     Run {
+        /// Path to a single .ds file (or a directory containing exactly one .ds)
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Arguments passed to the program
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -48,8 +60,8 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Check { path } => cmd_check(&path),
         Command::Dir { path, out, print } => cmd_dir(&path, &out, print),
-        Command::Build { .. } => Err(anyhow!("dust build: not implemented (v0.1 emits DIR only)")),
-        Command::Run { .. } => Err(anyhow!("dust run: not implemented (v0.1 emits DIR only)")),
+        Command::Build { path, out } => cmd_build(&path, out.as_deref()),
+        Command::Run { path, args } => cmd_run(&path, &args),
     }
 }
 
@@ -100,6 +112,82 @@ fn cmd_dir(path: &Path, out: &Path, print: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cmd_build(path: &Path, out: Option<&Path>) -> Result<()> {
+    let file = single_ds_file(path)?;
+    let src = fs::read_to_string(&file)?;
+    let ast = dust_semantics::parse_and_check(&src).map_err(|e| {
+        anyhow!(
+            "{}: {} at {}..{}",
+            file.display(),
+            e.message,
+            e.span.start,
+            e.span.end
+        )
+    })?;
+
+    let dir = dust_semantics::lower_to_dir(&ast);
+
+    // Default output path: target/dust/<stem>
+    let out_path = match out {
+        Some(p) => p.to_path_buf(),
+        None => default_out_path(&file)?,
+    };
+
+    // Ensure parent exists
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let exe = dust_codegen::build_executable(&dir, &out_path)?;
+    println!("{}", exe.display());
+    Ok(())
+}
+
+fn cmd_run(path: &Path, args: &[String]) -> Result<()> {
+    let file = single_ds_file(path)?;
+    let out_path = default_out_path(&file)?;
+
+    // Build first
+    cmd_build(&file, Some(&out_path))?;
+
+    // Codegen returns platform-normalized exe path; mirror that logic here.
+    let exe = if cfg!(windows) && out_path.extension().is_none() {
+        let mut p = out_path.clone();
+        p.set_extension("exe");
+        p
+    } else {
+        out_path
+    };
+
+    let status = ProcCommand::new(&exe).args(args).status()?;
+    if !status.success() {
+        bail!("program exited with {}", status);
+    }
+    Ok(())
+}
+
+fn default_out_path(ds_file: &Path) -> Result<PathBuf> {
+    let stem = ds_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow!("input has no valid file stem"))?;
+    Ok(PathBuf::from("target").join("dust").join(stem))
+}
+
+/// For build/run, require exactly one .ds file.
+fn single_ds_file(path: &Path) -> Result<PathBuf> {
+    let files = collect_ds_files(path)?;
+    match files.len() {
+        0 => Err(anyhow!("no .ds files found under {}", path.display())),
+        1 => Ok(files[0].clone()),
+        n => Err(anyhow!(
+            "expected exactly one .ds file for build/run, found {} under {}",
+            n,
+            path.display()
+        )),
+    }
 }
 
 fn collect_ds_files(path: &Path) -> Result<Vec<PathBuf>> {
