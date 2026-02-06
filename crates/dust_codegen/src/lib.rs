@@ -1,15 +1,19 @@
 // crates/dust_codegen/src/lib.rs
 //
-// Native codegen for DPL v0.1 (initial executable milestone)
+// Native codegen for DPL v0.1 (executable milestone)
 //
-// Goal:
-// - Take DIR (Dust Intermediate Representation) and produce a native executable.
-// - v0.1 executable subset implemented here:
-//     * K-regime process named `main`
-//     * body contains zero or more Effect(kind="emit", payload="<string literal>")
-// - Q and Φ regimes are not codegen-enabled yet (must be rejected earlier or here).
+// What this enables:
+// - `dust build <file.ds>` produces a native executable (ELF/Mach-O/PE)
+// - `dust run <file.ds>` builds then runs it
 //
-// Backend: Cranelift -> object file -> system linker.
+// v0.1 executable subset implemented here:
+// - A K-regime process named `main`
+// - Its body contains zero or more `emit "<string>"` effects
+//
+// Backend:
+// - Cranelift -> object file -> system linker (cc/clang/link.exe)
+//
+// NOTE: Q and Φ are not codegen-enabled here (they should be rejected earlier, but we also fail here).
 
 use anyhow::{anyhow, bail, Context, Result};
 use cranelift_codegen::ir::{AbiParam, FuncRef, Signature, UserFuncName};
@@ -17,37 +21,37 @@ use cranelift_codegen::isa;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataContext, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use dust_dir::{DirProgram, DirStmt};
+use dust_dir::{DirProgram, DirProc, DirStmt};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use target_lexicon::Triple;
 
+// Kept for backward compatibility with earlier scaffolding.
 pub fn generate() {
-    // Legacy stub entrypoint (kept for compatibility with early scaffolding).
-    // Prefer calling `build_executable(&dir, out_path)`.
+    // Prefer `build_executable(&dir, out_path)`
 }
 
 /// Build a native executable from a DIR program.
-/// `out_path` is the desired output executable path (extension will be adjusted on Windows if needed).
+/// Returns the actual executable path (normalized for Windows .exe).
 pub fn build_executable(dir: &DirProgram, out_path: &Path) -> Result<PathBuf> {
     let exe_path = normalize_exe_path(out_path);
 
     // Locate K::main in DIR
     let main = find_k_main(dir).context("DIR does not contain a codegen-capable K::main")?;
 
-    // Validate supported statement subset
+    // Validate supported subset and extract emit payloads
     let emit_strings = extract_emit_strings(&main.body)?;
 
     // Build object with Cranelift
     let obj_bytes = build_object_with_main(&emit_strings)?;
 
-    // Write object to temp and link
+    // Write object next to output and link
     let obj_path = write_object_temp(&exe_path, &obj_bytes)?;
     link_executable(&obj_path, &exe_path)?;
 
-    // Best effort: cleanup temp object
+    // Best-effort cleanup
     let _ = fs::remove_file(&obj_path);
 
     Ok(exe_path)
@@ -55,7 +59,6 @@ pub fn build_executable(dir: &DirProgram, out_path: &Path) -> Result<PathBuf> {
 
 fn normalize_exe_path(out_path: &Path) -> PathBuf {
     if cfg!(windows) {
-        // If user didn't provide .exe, add it.
         if out_path.extension().is_none() {
             let mut p = out_path.to_path_buf();
             p.set_extension("exe");
@@ -65,10 +68,16 @@ fn normalize_exe_path(out_path: &Path) -> PathBuf {
     out_path.to_path_buf()
 }
 
-fn find_k_main(dir: &DirProgram) -> Result<dust_dir::DirProc> {
+fn find_k_main(dir: &DirProgram) -> Result<DirProc> {
     for forge in &dir.forges {
         for p in &forge.procs {
-            if p.regime == "K" && p.name == "main" {
+            match p.regime.as_str() {
+                "K" => {}
+                "Q" => continue,
+                "Φ" => continue,
+                other => bail!("unknown regime in DIR: {}", other),
+            }
+            if p.name == "main" {
                 return Ok(p.clone());
             }
         }
@@ -85,30 +94,27 @@ fn extract_emit_strings(stmts: &[DirStmt]) -> Result<Vec<String>> {
                 if kind != "emit" {
                     bail!("unsupported effect kind in codegen v0.1: {}", kind);
                 }
-                let decoded = decode_string_literal(payload)
-                    .with_context(|| format!("emit payload must be a string literal, got: {}", payload))?;
+                let decoded = decode_string_literal(payload).with_context(|| {
+                    format!("emit payload must be a string literal, got: {}", payload)
+                })?;
                 out.push(decoded);
             }
-            // For the executable milestone, we only support emit statements in main.
-            other => bail!("unsupported statement in codegen v0.1 main: {:?}", other),
+            // For the executable milestone, we support only emit statements in main.
+            other => bail!("unsupported statement in v0.1 codegen main: {:?}", other),
         }
     }
 
     Ok(out)
 }
 
-/// DIR stores string literals as indicating `format!("{:?}", s)`
-/// which produces a quoted, escaped string (Rust debug string style).
-/// Example payload: "\"Hello\\nWorld\""
+/// `dust_semantics::lower_to_dir` serializes string literals as `format!("{:?}", s)`,
+/// e.g. "\"Hello\\nWorld\"" (quoted + escaped).
 fn decode_string_literal(payload: &str) -> Result<String> {
-    // Must begin and end with double-quotes to be treated as a string literal.
     let p = payload.trim();
     if !(p.starts_with('"') && p.ends_with('"') && p.len() >= 2) {
         bail!("not a string literal");
     }
 
-    // Minimal unescape compatible with Rust debug string output:
-    // supports: \n \r \t \\ \"
     let inner = &p[1..p.len() - 1];
     let mut out = String::new();
     let mut chars = inner.chars();
@@ -125,7 +131,6 @@ fn decode_string_literal(payload: &str) -> Result<String> {
             't' => out.push('\t'),
             '\\' => out.push('\\'),
             '"' => out.push('"'),
-            // Rust Debug may emit \u{...} for some chars; we do not support that in v0.1 codegen subset.
             _ => bail!("unsupported escape sequence: \\{}", esc),
         }
     }
@@ -138,7 +143,9 @@ fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
     let triple = Triple::host();
     let isa = isa::lookup(triple.clone())
         .map_err(|e| anyhow!("failed to lookup ISA for {}: {}", triple, e))?
-        .finish(cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder()));
+        .finish(cranelift_codegen::settings::Flags::new(
+            cranelift_codegen::settings::builder(),
+        ));
 
     let builder = ObjectBuilder::new(
         isa,
@@ -148,22 +155,23 @@ fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
     .context("failed to create ObjectBuilder")?;
 
     let mut module = ObjectModule::new(builder);
-
     let ptr_ty = module.target_config().pointer_type();
 
-    // Declare external `puts`:
-    // int puts(const char*);
+    // Declare external C `puts`: int puts(const char*);
     let mut puts_sig = Signature::new(module.isa().default_call_conv());
     puts_sig.params.push(AbiParam::new(ptr_ty));
-    puts_sig.returns.push(AbiParam::new(cranelift_codegen::ir::types::I32));
+    puts_sig
+        .returns
+        .push(AbiParam::new(cranelift_codegen::ir::types::I32));
     let puts_func = module
         .declare_function("puts", Linkage::Import, &puts_sig)
         .context("declare puts")?;
 
-    // Declare main
+    // Declare `main`: int main(void)
     let mut main_sig = Signature::new(module.isa().default_call_conv());
-    main_sig.returns.push(AbiParam::new(cranelift_codegen::ir::types::I32));
-
+    main_sig
+        .returns
+        .push(AbiParam::new(cranelift_codegen::ir::types::I32));
     let main_func = module
         .declare_function("main", Linkage::Export, &main_sig)
         .context("declare main")?;
@@ -178,8 +186,9 @@ fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
 
         let mut data_ctx = DataContext::new();
         let mut bytes = s.as_bytes().to_vec();
-        bytes.push(0); // null terminator for C string
+        bytes.push(0); // null terminator
         data_ctx.define(bytes.into_boxed_slice());
+
         module
             .define_data(data_id, &data_ctx)
             .with_context(|| format!("define data {}", name))?;
@@ -187,7 +196,7 @@ fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
         string_data_ids.push(data_id);
     }
 
-    // Build function body
+    // Build main function body
     let mut ctx = module.make_context();
     ctx.func.signature = main_sig;
     ctx.func.name = UserFuncName::user(0, main_func.as_u32());
@@ -199,7 +208,6 @@ fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
         b.switch_to_block(entry);
         b.seal_block(entry);
 
-        // Import puts as a function reference
         let puts_ref: FuncRef = module.declare_func_in_func(puts_func, b.func);
 
         for data_id in string_data_ids {
@@ -210,17 +218,14 @@ fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
 
         let zero = b.ins().iconst(cranelift_codegen::ir::types::I32, 0);
         b.ins().return_(&[zero]);
-
         b.finalize();
     }
 
     module
         .define_function(main_func, &mut ctx)
         .context("define main")?;
-
     module.finalize_definitions();
 
-    // Emit object bytes
     let product = module.finish();
     let obj = product.object.write().context("write object")?;
     Ok(obj)
@@ -250,33 +255,23 @@ fn write_object_temp(exe_path: &Path, obj_bytes: &[u8]) -> Result<PathBuf> {
 
 fn link_executable(obj_path: &Path, exe_path: &Path) -> Result<()> {
     if cfg!(windows) {
-        // Try link.exe first (MSVC), fallback to clang.
         if try_link_msvc(obj_path, exe_path)? {
             return Ok(());
         }
-        if try_link_clang(obj_path, exe_path)? {
+        if try_link_cc_like("clang", obj_path, exe_path)? {
             return Ok(());
         }
         bail!("no suitable linker found on Windows (tried link.exe, clang)");
-    } else if cfg!(target_os = "macos") {
-        // macOS: clang is typically available; cc also works.
-        if try_link_cc_like("cc", obj_path, exe_path)? {
-            return Ok(());
-        }
-        if try_link_cc_like("clang", obj_path, exe_path)? {
-            return Ok(());
-        }
-        bail!("no suitable linker found on macOS (tried cc, clang)");
-    } else {
-        // Linux and others
-        if try_link_cc_like("cc", obj_path, exe_path)? {
-            return Ok(());
-        }
-        if try_link_cc_like("clang", obj_path, exe_path)? {
-            return Ok(());
-        }
-        bail!("no suitable linker found (tried cc, clang)");
     }
+
+    if try_link_cc_like("cc", obj_path, exe_path)? {
+        return Ok(());
+    }
+    if try_link_cc_like("clang", obj_path, exe_path)? {
+        return Ok(());
+    }
+
+    bail!("no suitable linker found (tried cc, clang)");
 }
 
 fn try_link_cc_like(tool: &str, obj_path: &Path, exe_path: &Path) -> Result<bool> {
@@ -291,11 +286,6 @@ fn try_link_cc_like(tool: &str, obj_path: &Path, exe_path: &Path) -> Result<bool
         Ok(_) => Ok(false),
         Err(_) => Ok(false),
     }
-}
-
-fn try_link_clang(obj_path: &Path, exe_path: &Path) -> Result<bool> {
-    // On Windows, clang can link via lld or MSVC depending on setup.
-    try_link_cc_like("clang", obj_path, exe_path)
 }
 
 fn try_link_msvc(obj_path: &Path, exe_path: &Path) -> Result<bool> {
