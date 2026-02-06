@@ -1,15 +1,9 @@
 # .github/workflows/ci.yml
 #
-# Continuous Integration for the Dust compiler
+# CI pipeline for the Dust compiler
 #
-# This workflow proves that Dust is a *real compiler*:
-#   DPL (.ds) → native executable → executed successfully
-#
-# It validates:
-# - Rust workspace builds
-# - DPL frontend + semantics are sound
-# - Codegen + linker produce real binaries
-# - K-regime effects execute deterministically
+# Fix: `actions/setup-rust` does not exist, so we use `dtolnay/rust-toolchain@stable`.
+# Optional: use `Swatinem/rust-cache@v2` for fast incremental builds.
 
 name: dust-ci
 
@@ -29,18 +23,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust (stable)
-        uses: actions/setup-rust@v1
-        with:
-          rust-version: stable
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Build workspace
         run: cargo build --workspace --verbose
