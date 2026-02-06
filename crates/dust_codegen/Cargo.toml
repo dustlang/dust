@@ -5,21 +5,13 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-# ─────────────────────────────────────────────
-# Error handling
-# ─────────────────────────────────────────────
 anyhow.workspace = true
 
-# ─────────────────────────────────────────────
-# Cranelift backend
-# ─────────────────────────────────────────────
 cranelift-codegen.workspace = true
 cranelift-module.workspace = true
 cranelift-object.workspace = true
+cranelift-frontend.workspace = true
+
 target-lexicon.workspace = true
 
-# ─────────────────────────────────────────────
-# Dust internal crates (REQUIRED)
-# ─────────────────────────────────────────────
 dust_dir = { path = "../dust_dir" }
-dust_semantics = { path = "../dust_semantics" }
