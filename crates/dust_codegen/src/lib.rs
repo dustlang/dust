@@ -231,7 +231,6 @@ fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
         .context("define main")?;
 
     module.clear_context(&mut ctx);
-    module.finalize_definitions();
 
     let product = module.finish();
     let obj = product.object;
