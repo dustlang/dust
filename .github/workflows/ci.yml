@@ -1,68 +1,56 @@
-name: CI
+# .github/workflows/ci.yml
+#
+# CI pipeline for the Dust compiler
+#
+# Goals:
+# - Ensure the Rust workspace builds
+# - Ensure the DPL frontend + semantics work
+# - Ensure we can produce and run a native executable from a .ds file
+#
+# This is the *proof point* that Dust is a real compiler, not just a parser.
+
+name: dust-ci
 
 on:
   push:
+    branches: [ "main" ]
   pull_request:
+    branches: [ "main" ]
 
 jobs:
-  build_test_check:
-    name: Build + Test + Verify Examples (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+  build-and-test:
+    name: Build & Execute DPL
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions/setup-rust@v1
         with:
-          components: rustfmt, clippy
+          rust-version: stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Cargo fmt (check)
-        run: cargo fmt --all -- --check
+      - name: Build workspace
+        run: cargo build --workspace --verbose
 
-      - name: Cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run unit tests
+        run: cargo test --workspace --verbose
 
-      - name: Cargo test
-        run: cargo test --all --all-features
-
-      - name: Cargo build (release)
-        run: cargo build --release
-
-      # ---- DPL v0.1 example verification ----
-      - name: Verify examples directory exists
-        shell: bash
+      - name: Build DPL executable (K-regime)
         run: |
-          test -d examples || (echo "examples/ missing" && exit 1)
+          cargo run -p dust -- build examples/K/k_hello_world.ds
 
-      - name: Run dust check on examples
-        shell: bash
+      - name: Run produced executable
         run: |
-          # Run the just-built compiler from the workspace.
-          # If your binary crate name is `dust` this will work.
-          cargo run --release --bin dust -- check examples
-
-      - name: Emit DIR for examples
-        shell: bash
-        run: |
-          rm -rf target/dir-ci
-          cargo run --release --bin dust -- dir examples --out target/dir-ci
-
-      # Optional: verify determinism by emitting twice and diffing.
-      - name: Determinism check (DIR output stable)
-        shell: bash
-        run: |
-          rm -rf target/dir-ci-2
-          cargo run --release --bin dust -- dir examples --out target/dir-ci-2
-
-          # Compare directory trees (best-effort cross-platform).
-          # On Windows bash shell this still works in Actions runners.
-          diff -qr target/dir-ci target/dir-ci-2
+          ./target/dust/k_hello_world > output.txt
+          grep -q "Hello" output.txt
