@@ -1,0 +1,18 @@
+// examples/K/k_multiple_emits.ds
+//
+// Purpose:
+// - Verifies ordered, irreversible effects in K-regime
+// - Confirms that emit effects occur strictly in source order
+//
+// Expected behavior when executed:
+//   First line
+//   Second line
+//   Third line
+//
+// Any reordering or omission is a compiler/runtime bug.
+
+K main {
+    emit "First line";
+    emit "Second line";
+    emit "Third line";
+}
