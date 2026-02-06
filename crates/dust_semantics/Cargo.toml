@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 thiserror.workspace = true
 dust_frontend = { path = "../dust_frontend" }
+dust_dir = { path = "../dust_dir" }
