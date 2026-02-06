@@ -1,0 +1,15 @@
+// examples/K/k_hello_world.ds
+//
+// Canonical v0.1 executable smoke test for the Dust Programming Language.
+// This file is intentionally minimal and MUST remain executable across
+// all future compiler changes unless the language version changes.
+//
+// Regime: K (Classical / Deterministic)
+// Effects: emit only
+// Expected behavior:
+//   - Compiles to a native executable
+//   - When run, prints "Hello, Dust" followed by a newline
+
+K main {
+    emit "Hello, Dust";
+}
