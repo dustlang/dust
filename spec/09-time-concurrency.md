@@ -66,100 +66,103 @@ Example:
 bind Φ::validate -> K::execute contract {
     latency_us < 5000;
 }
+```
 
 Such constraints:
-	•	do not introduce concurrency,
-	•	do not affect logical ordering,
-	•	are treated as admissibility requirements.
+- do not introduce concurrency,
+- do not affect logical ordering,
+- are treated as admissibility requirements.
 
-⸻
+---
 
-9.4 Concurrency Model (v0.1)
+## 9.4 Concurrency Model (v0.1)
 
-9.4.1 Absence of Concurrency
+### 9.4.1 Absence of Concurrency
 
-DPL v0.1 defines no concurrency constructs.
+DPL v0.1 defines **no concurrency constructs**.
 
 Specifically:
-	•	there are no threads,
-	•	no async or await,
-	•	no parallel blocks,
-	•	no shared mutable state.
+- there are no threads,
+- no async or await,
+- no parallel blocks,
+- no shared mutable state.
 
 Every process is evaluated as a single, sequential semantic unit.
 
-⸻
+---
 
-9.4.2 Rationale
+### 9.4.2 Rationale
 
 This restriction ensures that:
-	•	effect ordering is unambiguous,
-	•	audit logs are deterministic,
-	•	semantic failures are reproducible,
-	•	regime boundaries are not violated by timing artifacts.
+- effect ordering is unambiguous,
+- audit logs are deterministic,
+- semantic failures are reproducible,
+- regime boundaries are not violated by timing artifacts.
 
 Concurrency is a future extension and is explicitly out of scope for v0.1.
 
-⸻
+---
 
-9.5 Time and Regimes
+## 9.5 Time and Regimes
 
-9.5.1 K-Regime
+### 9.5.1 K-Regime
 
-In K-regime:
-	•	logical time defines execution order,
-	•	physical time constraints MAY gate admissibility,
-	•	effects are sequenced deterministically.
+In **K-regime**:
+- logical time defines execution order,
+- physical time constraints MAY gate admissibility,
+- effects are sequenced deterministically.
 
-⸻
+---
 
-9.5.2 Q-Regime
+### 9.5.2 Q-Regime
 
-In Q-regime:
-	•	time is implicit in linear consumption,
-	•	no physical-time references are permitted inside process bodies,
-	•	ordering is structural, not temporal.
+In **Q-regime**:
+- time is implicit in linear consumption,
+- no physical-time references are permitted inside process bodies,
+- ordering is structural, not temporal.
 
-⸻
+---
 
-9.5.3 Φ-Regime
+### 9.5.3 Φ-Regime
 
-In Φ-regime:
-	•	time has no operational meaning,
-	•	admissibility is timeless,
-	•	constraints are evaluated without reference to execution order.
+In **Φ-regime**:
+- time has no operational meaning,
+- admissibility is timeless,
+- constraints are evaluated without reference to execution order.
 
-⸻
+---
 
-9.6 Time-Related Failure
+## 9.6 Time-Related Failure
 
 A process or binding MAY fail if:
-	•	a declared physical-time constraint cannot be satisfied,
-	•	a required ordering cannot be preserved.
+- a declared physical-time constraint cannot be satisfied,
+- a required ordering cannot be preserved.
 
-Such failures are semantic failures and MUST be reported deterministically.
+Such failures are **semantic failures** and MUST be reported deterministically.
 
-⸻
+---
 
-9.7 Representation in DIR
+## 9.7 Representation in DIR
 
 DIR MUST preserve:
-	•	the logical ordering of statements and effects,
-	•	any declared physical-time constraints,
-	•	the absence of concurrency semantics.
+- the logical ordering of statements and effects,
+- any declared physical-time constraints,
+- the absence of concurrency semantics.
 
 DIR MUST NOT introduce timestamps, clocks, or scheduling artifacts.
 
-⸻
+---
 
-9.8 Future Extensions (Non-Normative)
+## 9.8 Future Extensions (Non-Normative)
 
 Future versions of DPL may introduce:
-	•	explicit concurrency constructs,
-	•	time-aware effects,
-	•	temporal logic constraints,
-	•	schedulable process graphs.
+- explicit concurrency constructs,
+- time-aware effects,
+- temporal logic constraints,
+- schedulable process graphs.
 
 Any such extensions MUST preserve the explicitness and auditability guarantees established in v0.1.
 
-⸻
+---
+
+End of Section 9.
