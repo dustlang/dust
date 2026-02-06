@@ -1,3 +1,5 @@
+# crates/dust_driver/Cargo.toml
+
 [package]
 name = "dust"
 version.workspace = true
