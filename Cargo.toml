@@ -1,21 +1,43 @@
 [workspace]
 members = [
-    "crates/dust_driver",
     "crates/dust_frontend",
-    "crates/dust_semantics",
     "crates/dust_dir",
+    "crates/dust_semantics",
     "crates/dust_codegen",
+    "crates/dust_driver",
 ]
 
 resolver = "2"
 
+# ─────────────────────────────────────────────
+# Workspace package metadata
+# ─────────────────────────────────────────────
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "Dust Open Source License"
 authors = ["Dust LLC"]
+license-file = "LICENSE"
 
+# ─────────────────────────────────────────────
+# Shared dependency versions
+# ─────────────────────────────────────────────
 [workspace.dependencies]
-thiserror = "1.0"
 anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+
+# Cranelift toolchain (aligned versions)
+cranelift-codegen = "0.110"
+cranelift-module = "0.110"
+cranelift-object = "0.110"
+
+target-lexicon = "0.12"
+
+# ─────────────────────────────────────────────
+# Workspace profiles (optional but CI-safe)
+# ─────────────────────────────────────────────
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = true
