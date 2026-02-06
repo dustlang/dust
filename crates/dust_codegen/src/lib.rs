@@ -19,6 +19,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use cranelift_codegen::ir::{AbiParam, FuncRef, Signature, UserFuncName};
 use cranelift_codegen::isa;
 use cranelift_codegen::settings;
+use cranelift_codegen::ir::InstBuilder;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
