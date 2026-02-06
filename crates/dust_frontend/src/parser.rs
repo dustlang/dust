@@ -1,159 +1,139 @@
 // crates/dust_frontend/src/parser.rs
-//
-// DPL v0.1 parser (frontend) — produces AST from lexer tokens.
-// Goal: compile cleanly + provide a strict-enough, spec-aligned structure parser.
-//
-// Notes:
-// - We deliberately keep parsing rules conservative.
-// - For v0.1, we treat some “future keywords” as identifiers inside blocks
-//   (e.g., `requires`, `ensures`, `if`, `else`) to avoid lexer churn.
-// - This parser is NOT a full language implementation; it is a correct structural
-//   frontend for the current AST.
-//
-// © 2026 Dust LLC
 
 use crate::ast::*;
 use crate::lexer::{Keyword, Token};
+use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParseErrorKind {
-    UnexpectedEof,
-    UnexpectedToken,
-    ExpectedToken,
-    ExpectedIdent,
-    ExpectedLiteral,
-    ExpectedRegime,
-    ExpectedPathSep,
-    ExpectedBlock,
-    Message,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ParseError {
-    pub kind: ParseErrorKind,
-    pub span: Span,
     pub message: String,
+    pub span: Span,
 }
 
-impl ParseError {
-    fn new(kind: ParseErrorKind, span: Span, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            span,
-            message: message.into(),
-        }
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} at {}..{}", self.message, self.span.start, self.span.end)
     }
 }
 
 pub struct Parser {
-    tokens: Vec<Spanned<Token>>,
+    toks: Vec<Spanned<Token>>,
     i: usize,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Spanned<Token>>) -> Self {
-        Self { tokens, i: 0 }
+    pub fn new(toks: Vec<Spanned<Token>>) -> Self {
+        Self { toks, i: 0 }
     }
 
-    pub fn parse_file(&mut self) -> Result<File, ParseError> {
-        let mut items = Vec::new();
+    pub fn parse_file(&mut self) -> Result<FileAst, ParseError> {
+        let mut forges = Vec::new();
         while !self.is_eof() {
-            // Skip stray semicolons (tolerant mode)
-            if self.peek_is(Token::Semi) {
-                self.bump();
-                continue;
-            }
-            items.push(self.parse_item()?);
+            forges.push(self.parse_forge()?);
         }
-        Ok(File { items })
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Items
-    // ─────────────────────────────────────────────────────────────────────────
-
-    fn parse_item(&mut self) -> Result<Item, ParseError> {
-        if self.peek_is_kw(Keyword::Forge) {
-            Ok(Item::Forge(self.parse_forge()?))
-        } else if self.peek_is_kw(Keyword::Shape) {
-            Ok(Item::Shape(self.parse_shape()?))
-        } else if self.peek_is_kw(Keyword::Proc) {
-            Ok(Item::Proc(self.parse_proc()?))
-        } else if self.peek_is_kw(Keyword::Bind) {
-            Ok(Item::Bind(self.parse_bind()?))
-        } else {
-            Err(self.err_here(
-                ParseErrorKind::UnexpectedToken,
-                "expected item: forge | shape | proc | bind",
-            ))
-        }
+        Ok(FileAst { forges })
     }
 
     fn parse_forge(&mut self) -> Result<Spanned<ForgeDecl>, ParseError> {
-        let kw = self.expect_kw(Keyword::Forge)?;
+        let start = self.expect_kw(Keyword::Forge)?.span.start;
         let name = self.expect_ident()?;
-        let start = kw.span.start;
-
         self.expect(Token::LBrace)?;
         let mut items = Vec::new();
-        while !self.peek_is(Token::RBrace) {
-            if self.is_eof() {
-                return Err(self.err_at(
-                    ParseErrorKind::UnexpectedEof,
-                    Span::new(start, self.last_end()),
-                    "unterminated forge block",
-                ));
-            }
-            if self.peek_is(Token::Semi) {
-                self.bump();
-                continue;
-            }
+        while !self.peek_is(&Token::RBrace) {
             items.push(self.parse_item()?);
         }
         let end = self.expect(Token::RBrace)?.span.end;
-
         Ok(Spanned::new(
             ForgeDecl { name, items },
             Span::new(start, end),
         ))
     }
 
+    fn parse_item(&mut self) -> Result<Spanned<Item>, ParseError> {
+        match &self.peek().node {
+            Token::Keyword(Keyword::Shape) => {
+                let s = self.parse_shape()?;
+                Ok(Spanned::new(Item::Shape(s.node), s.span))
+            }
+            Token::Keyword(Keyword::Proc) => {
+                let p = self.parse_proc()?;
+                Ok(Spanned::new(Item::Proc(p.node), p.span))
+            }
+            Token::Keyword(Keyword::Bind) => {
+                let b = self.parse_bind()?;
+                Ok(Spanned::new(Item::Bind(b.node), b.span))
+            }
+            Token::Keyword(Keyword::Let) => {
+                let l = self.parse_let()?;
+                Ok(Spanned::new(Item::Let(l.node), l.span))
+            }
+            Token::Keyword(Keyword::Contract) => {
+                let c = self.parse_contract()?;
+                Ok(Spanned::new(Item::Contract(c.node), c.span))
+            }
+            Token::Keyword(Keyword::Fn) => {
+                let f = self.parse_fn()?;
+                Ok(Spanned::new(Item::Fn(f.node), f.span))
+            }
+            Token::Keyword(Keyword::Use) => {
+                let u = self.parse_use()?;
+                Ok(Spanned::new(Item::Use(u.node), u.span))
+            }
+            Token::Keyword(Keyword::Emit) => {
+                let e = self.parse_emit()?;
+                Ok(Spanned::new(Item::Emit(e.node), e.span))
+            }
+            Token::Keyword(Keyword::Assert) => {
+                let a = self.parse_assert()?;
+                Ok(Spanned::new(Item::Assert(a.node), a.span))
+            }
+            Token::Keyword(Keyword::If) => {
+                let s = self.parse_if_stmt()?;
+                Ok(Spanned::new(Item::Stmt(s.node), s.span))
+            }
+            Token::Keyword(Keyword::While) => {
+                let s = self.parse_while_stmt()?;
+                Ok(Spanned::new(Item::Stmt(s.node), s.span))
+            }
+            Token::Keyword(Keyword::Return) => {
+                let s = self.parse_return_stmt()?;
+                Ok(Spanned::new(Item::Stmt(s.node), s.span))
+            }
+            Token::Keyword(Keyword::Fail) => {
+                let s = self.parse_fail_stmt()?;
+                Ok(Spanned::new(Item::Stmt(s.node), s.span))
+            }
+            _ => Err(self.err_here("expected item (shape/proc/bind/let/contract/fn/use/emit/assert/stmt)")),
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Decls
+    // ─────────────────────────────────────────────────────────────────────────────
+
     fn parse_shape(&mut self) -> Result<Spanned<ShapeDecl>, ParseError> {
-        let kw = self.expect_kw(Keyword::Shape)?;
+        let start = self.expect_kw(Keyword::Shape)?.span.start;
         let name = self.expect_ident()?;
-        let start = kw.span.start;
-
         self.expect(Token::LBrace)?;
+
         let mut fields = Vec::new();
-        while !self.peek_is(Token::RBrace) {
-            if self.is_eof() {
-                return Err(self.err_at(
-                    ParseErrorKind::UnexpectedEof,
-                    Span::new(start, self.last_end()),
-                    "unterminated shape block",
-                ));
-            }
-            if self.peek_is(Token::Semi) {
-                self.bump();
-                continue;
-            }
-
+        while !self.peek_is(&Token::RBrace) {
             let fname = self.expect_ident()?;
-            self.expect(Token::Colon)?;
-            let fty = self.parse_type_ref()?;
-            let semi = self.expect(Token::Semi)?;
+            let f_start = fname.span.start;
 
-            let fspan = Span::new(fname.span.start, semi.span.end);
+            self.expect(Token::Colon)?;
+            let ty = self.parse_type_ref()?;
+            let t_end = ty.span.end;
+
+            self.expect(Token::Semi)?;
+
             fields.push(Spanned::new(
-                FieldDecl {
-                    name: fname,
-                    ty: fty,
-                },
-                fspan,
+                FieldDecl { name: fname, ty },
+                Span::new(f_start, t_end),
             ));
         }
-        let end = self.expect(Token::RBrace)?.span.end;
 
+        let end = self.expect(Token::RBrace)?.span.end;
         Ok(Spanned::new(
             ShapeDecl { name, fields },
             Span::new(start, end),
@@ -161,38 +141,18 @@ impl Parser {
     }
 
     fn parse_proc(&mut self) -> Result<Spanned<ProcDecl>, ParseError> {
-        let kw = self.expect_kw(Keyword::Proc)?;
-        let start = kw.span.start;
+        let start = self.expect_kw(Keyword::Proc)?.span.start;
 
+        // proc <path> <regime> (<args>) : <type> { <body> }
         let path = self.parse_proc_path()?;
+        let regime = self.parse_regime()?;
 
         self.expect(Token::LParen)?;
-        let mut params = Vec::new();
-        if !self.peek_is(Token::RParen) {
-            loop {
-                let p = self.parse_param_decl()?;
-                params.push(p);
-                if self.peek_is(Token::Comma) {
-                    self.bump();
-                    continue;
-                }
-                break;
-            }
-        }
+        let args = self.parse_named_args()?;
         self.expect(Token::RParen)?;
 
-        let ret = if self.peek_is(Token::Arrow) {
-            self.bump();
-            Some(self.parse_type_ref()?)
-        } else {
-            None
-        };
-
-        // zero or more contract blocks
-        let mut contracts = Vec::new();
-        while self.peek_is_kw(Keyword::Contract) {
-            contracts.extend(self.parse_contract_block()?);
-        }
+        self.expect(Token::Colon)?;
+        let ret_ty = self.parse_type_ref()?;
 
         let body = self.parse_block()?;
         let end = body.span.end;
@@ -200,339 +160,326 @@ impl Parser {
         Ok(Spanned::new(
             ProcDecl {
                 path,
-                params,
-                ret,
-                contracts,
+                regime,
+                args,
+                ret_ty,
                 body,
             },
             Span::new(start, end),
         ))
     }
 
-    fn parse_param_decl(&mut self) -> Result<Spanned<ParamDecl>, ParseError> {
-        let name = self.expect_ident()?;
-        self.expect(Token::Colon)?;
-        let ty = self.parse_type_ref()?;
-        let span = Span::new(name.span.start, ty.span.end);
-        Ok(Spanned::new(ParamDecl { name, ty }, span))
-    }
-
     fn parse_bind(&mut self) -> Result<Spanned<BindDecl>, ParseError> {
-        let kw = self.expect_kw(Keyword::Bind)?;
-        let start = kw.span.start;
+        let start = self.expect_kw(Keyword::Bind)?.span.start;
 
+        // bind <name> = <proc_path> ;
         let name = self.expect_ident()?;
-
-        // allow: bind x = K::foo(...)
-        // allow: bind x -> K::foo(...)
-        if self.peek_is(Token::Eq) || self.peek_is(Token::Arrow) {
-            self.bump();
-        } else {
-            return Err(self.err_here(
-                ParseErrorKind::ExpectedToken,
-                "expected '=' or '->' after bind name",
-            ));
-        }
-
+        self.expect(Token::Eq)?;
         let target = self.parse_proc_path()?;
-
-        let mut args = Vec::new();
-        if self.peek_is(Token::LParen) {
-            self.bump();
-            if !self.peek_is(Token::RParen) {
-                loop {
-                    args.push(self.parse_named_arg()?);
-                    if self.peek_is(Token::Comma) {
-                        self.bump();
-                        continue;
-                    }
-                    break;
-                }
-            }
-            self.expect(Token::RParen)?;
-        }
-
-        let semi = self.expect(Token::Semi)?;
-        let end = semi.span.end;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
 
         Ok(Spanned::new(
-            BindDecl {
+            BindDecl { name, target },
+            Span::new(start, end),
+        ))
+    }
+
+    fn parse_let(&mut self) -> Result<Spanned<LetDecl>, ParseError> {
+        let start = self.expect_kw(Keyword::Let)?.span.start;
+
+        // let <ident> : <type> = <expr> ;
+        let name = self.expect_ident()?;
+        let name_end = name.span.end;
+
+        self.expect(Token::Colon)?;
+        let ty = self.parse_type_ref()?;
+
+        self.expect(Token::Eq)?;
+        let value = self.parse_expr()?;
+
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+
+        Ok(Spanned::new(
+            LetDecl { name, ty, value },
+            Span::new(start, end.max(name_end)),
+        ))
+    }
+
+    fn parse_contract(&mut self) -> Result<Spanned<ContractDecl>, ParseError> {
+        let start = self.expect_kw(Keyword::Contract)?.span.start;
+
+        // contract <ident> { requires: <expr>; ensures: <expr>; }
+        let name = self.expect_ident()?;
+        self.expect(Token::LBrace)?;
+
+        self.expect_kw(Keyword::Requires)?;
+        self.expect(Token::Colon)?;
+        let requires = self.parse_expr()?;
+        self.expect(Token::Semi)?;
+
+        self.expect_kw(Keyword::Ensures)?;
+        self.expect(Token::Colon)?;
+        let ensures = self.parse_expr()?;
+        self.expect(Token::Semi)?;
+
+        let end = self.expect(Token::RBrace)?.span.end;
+
+        Ok(Spanned::new(
+            ContractDecl {
                 name,
-                target,
-                args,
+                requires,
+                ensures,
             },
             Span::new(start, end),
         ))
     }
 
-    fn parse_named_arg(&mut self) -> Result<Spanned<NamedArg>, ParseError> {
-        let key = self.expect_ident()?;
+    fn parse_fn(&mut self) -> Result<Spanned<FnDecl>, ParseError> {
+        let start = self.expect_kw(Keyword::Fn)?.span.start;
+
+        // fn <ident> ( <params> ) : <type> { <body> }
+        let name = self.expect_ident()?;
+
+        self.expect(Token::LParen)?;
+        let params = self.parse_params()?;
+        self.expect(Token::RParen)?;
+
         self.expect(Token::Colon)?;
-        let lit = self.parse_literal()?;
-        let span = Span::new(key.span.start, lit.span.end);
+        let ret_ty = self.parse_type_ref()?;
+
+        let body = self.parse_block()?;
+        let end = body.span.end;
+
         Ok(Spanned::new(
-            NamedArg {
-                key,
-                value: lit,
+            FnDecl {
+                name,
+                params,
+                ret_ty,
+                body,
             },
-            span,
+            Span::new(start, end),
         ))
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Proc paths + regimes
-    // ─────────────────────────────────────────────────────────────────────────
+    fn parse_use(&mut self) -> Result<Spanned<UseDecl>, ParseError> {
+        let start = self.expect_kw(Keyword::Use)?.span.start;
+        let path = self.parse_proc_path()?;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(UseDecl { path }, Span::new(start, end)))
+    }
+
+    fn parse_emit(&mut self) -> Result<Spanned<EmitStmt>, ParseError> {
+        let start = self.expect_kw(Keyword::Emit)?.span.start;
+        let expr = self.parse_expr()?;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(EmitStmt { expr }, Span::new(start, end)))
+    }
+
+    fn parse_assert(&mut self) -> Result<Spanned<AssertStmt>, ParseError> {
+        let start = self.expect_kw(Keyword::Assert)?.span.start;
+        let expr = self.parse_expr()?;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(
+            AssertStmt { expr },
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Paths, regimes, params
+    // ─────────────────────────────────────────────────────────────────────────────
 
     fn parse_proc_path(&mut self) -> Result<Spanned<ProcPath>, ParseError> {
-        let regime = self.parse_regime()?;
-        let start = regime.span.start;
-
-        if !self.peek_is(Token::ColonColon) {
-            return Err(self.err_here(
-                ParseErrorKind::ExpectedPathSep,
-                "expected '::' in proc path",
-            ));
-        }
-        self.bump(); // ::
-
+        // <Ident> :: <Ident>
+        let start = self.expect_ident()?.span.start;
+        self.expect(Token::ColonColon)?;
         let name = self.expect_ident()?;
         let end = name.span.end;
 
         Ok(Spanned::new(
-            ProcPath { regime, name },
+            ProcPath {
+                module: Ident::synthetic("<forge>", Span::new(start, start)),
+                name,
+            },
             Span::new(start, end),
         ))
     }
 
     fn parse_regime(&mut self) -> Result<Spanned<Regime>, ParseError> {
-        let t = self.peek();
-        match &t.node {
+        let t = self.peek().clone();
+        match t.node {
             Token::Keyword(Keyword::K) => {
-                let s = t.span;
-                self.bump();
-                Ok(Spanned::new(Regime::K, s))
+                let sp = self.bump().span;
+                Ok(Spanned::new(Regime::K, sp))
             }
             Token::Keyword(Keyword::Q) => {
-                let s = t.span;
-                self.bump();
-                Ok(Spanned::new(Regime::Q, s))
+                let sp = self.bump().span;
+                Ok(Spanned::new(Regime::Q, sp))
             }
             Token::Keyword(Keyword::Phi) => {
-                let s = t.span;
-                self.bump();
-                Ok(Spanned::new(Regime::Phi, s))
+                let sp = self.bump().span;
+                Ok(Spanned::new(Regime::Phi, sp))
             }
-            _ => Err(self.err_here(
-                ParseErrorKind::ExpectedRegime,
-                "expected regime keyword: K | Q | Φ",
-            )),
+            _ => Err(self.err_here("expected regime (K/Q/Φ)")),
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Contracts
-    // ─────────────────────────────────────────────────────────────────────────
-    //
-    // Syntax:
-    //   contract { requires <expr>; ensures <expr>; uses <Ident>; }
-    //
-    // We intentionally parse `requires/ensures/uses` as identifiers (not keywords)
-    // so the lexer doesn’t need to reserve more keywords in v0.1.
-    //
+    fn parse_params(&mut self) -> Result<Vec<Spanned<ParamDecl>>, ParseError> {
+        let mut params = Vec::new();
+        if self.peek_is(&Token::RParen) {
+            return Ok(params);
+        }
+        loop {
+            let p_start = self.peek().span.start;
+            let name = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            let ty = self.parse_type_ref()?;
+            let p_end = ty.span.end;
 
-    fn parse_contract_block(&mut self) -> Result<Vec<Spanned<ContractDecl>>, ParseError> {
-        let kw = self.expect_kw(Keyword::Contract)?;
-        let start = kw.span.start;
+            params.push(Spanned::new(
+                ParamDecl { name, ty },
+                Span::new(p_start, p_end),
+            ));
 
-        self.expect(Token::LBrace)?;
-        let mut out = Vec::new();
-
-        while !self.peek_is(Token::RBrace) {
-            if self.is_eof() {
-                return Err(self.err_at(
-                    ParseErrorKind::UnexpectedEof,
-                    Span::new(start, self.last_end()),
-                    "unterminated contract block",
-                ));
-            }
-            if self.peek_is(Token::Semi) {
+            if self.peek_is(&Token::Comma) {
                 self.bump();
                 continue;
             }
-
-            // clause head must be an identifier: requires | ensures | uses
-            let head = self.expect_ident()?;
-            let head_txt = head.text.as_str();
-
-            match head_txt {
-                "requires" => {
-                    let pred = self.parse_expr()?;
-                    let semi = self.expect(Token::Semi)?;
-                    out.push(Spanned::new(
-                        ContractDecl::Requires(pred),
-                        Span::new(head.span.start, semi.span.end),
-                    ));
-                }
-                "ensures" => {
-                    let pred = self.parse_expr()?;
-                    let semi = self.expect(Token::Semi)?;
-                    out.push(Spanned::new(
-                        ContractDecl::Ensures(pred),
-                        Span::new(head.span.start, semi.span.end),
-                    ));
-                }
-                "uses" => {
-                    let name = self.expect_ident()?;
-                    let semi = self.expect(Token::Semi)?;
-                    out.push(Spanned::new(
-                        ContractDecl::Uses(name),
-                        Span::new(head.span.start, semi.span.end),
-                    ));
-                }
-                _ => {
-                    return Err(self.err_at(
-                        ParseErrorKind::Message,
-                        head.span,
-                        "unknown contract clause; expected: requires | ensures | uses",
-                    ));
-                }
-            }
+            break;
         }
-
-        self.expect(Token::RBrace)?;
-        Ok(out)
+        Ok(params)
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Blocks + statements
-    // ─────────────────────────────────────────────────────────────────────────
+    fn parse_named_args(&mut self) -> Result<Vec<Spanned<NamedArg>>, ParseError> {
+        let mut args = Vec::new();
+        if self.peek_is(&Token::RParen) {
+            return Ok(args);
+        }
+        loop {
+            let k = self.expect_ident()?;
+            let k_start = k.span.start;
+            self.expect(Token::Eq)?;
+            let lit = self.parse_literal()?;
+            let lit_end = lit.span.end;
+
+            args.push(Spanned::new(
+                NamedArg { key: k, value: lit },
+                Span::new(k_start, lit_end),
+            ));
+
+            if self.peek_is(&Token::Comma) {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        Ok(args)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Types
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    fn parse_type_ref(&mut self) -> Result<Spanned<TypeRef>, ParseError> {
+        let t = self.peek().clone();
+        match t.node {
+            Token::Ident(_) => {
+                let id = self.expect_ident()?;
+                Ok(Spanned::new(TypeRef::Named(id.clone()), id.span))
+            }
+            Token::Keyword(Keyword::I32) => {
+                let sp = self.bump().span;
+                Ok(Spanned::new(TypeRef::I32, sp))
+            }
+            Token::Keyword(Keyword::I64) => {
+                let sp = self.bump().span;
+                Ok(Spanned::new(TypeRef::I64, sp))
+            }
+            Token::Keyword(Keyword::U32) => {
+                let sp = self.bump().span;
+                Ok(Spanned::new(TypeRef::U32, sp))
+            }
+            Token::Keyword(Keyword::U64) => {
+                let sp = self.bump().span;
+                Ok(Spanned::new(TypeRef::U64, sp))
+            }
+            Token::Keyword(Keyword::Bool) => {
+                let sp = self.bump().span;
+                Ok(Spanned::new(TypeRef::Bool, sp))
+            }
+            Token::Keyword(Keyword::Str) => {
+                let sp = self.bump().span;
+                Ok(Spanned::new(TypeRef::Str, sp))
+            }
+            _ => Err(self.err_here("expected type")),
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Blocks & statements
+    // ─────────────────────────────────────────────────────────────────────────────
 
     fn parse_block(&mut self) -> Result<Spanned<Block>, ParseError> {
-        if !self.peek_is(Token::LBrace) {
-            return Err(self.err_here(ParseErrorKind::ExpectedBlock, "expected '{'"));
-        }
-        let lb = self.expect(Token::LBrace)?;
-        let start = lb.span.start;
-
+        let start = self.expect(Token::LBrace)?.span.start;
         let mut stmts = Vec::new();
-        while !self.peek_is(Token::RBrace) {
-            if self.is_eof() {
-                return Err(self.err_at(
-                    ParseErrorKind::UnexpectedEof,
-                    Span::new(start, self.last_end()),
-                    "unterminated block",
-                ));
-            }
-            if self.peek_is(Token::Semi) {
-                self.bump();
-                continue;
-            }
+        while !self.peek_is(&Token::RBrace) {
             stmts.push(self.parse_stmt()?);
         }
-
-        let rb = self.expect(Token::RBrace)?;
-        let end = rb.span.end;
-
+        let end = self.expect(Token::RBrace)?.span.end;
         Ok(Spanned::new(Block { stmts }, Span::new(start, end)))
     }
 
     fn parse_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
-        let t = self.peek();
-        match &t.node {
-            Token::Keyword(Keyword::Let) => self.parse_let_stmt().map(|s| s.map(Stmt::Let)),
-            Token::Keyword(Keyword::Constrain) => self.parse_unary_kw_stmt(Keyword::Constrain, Stmt::Constrain),
-            Token::Keyword(Keyword::Prove) => self.parse_unary_kw_stmt(Keyword::Prove, Stmt::Prove),
-            Token::Keyword(Keyword::Emit) => self.parse_unary_kw_stmt(Keyword::Emit, Stmt::Emit),
-            Token::Keyword(Keyword::Observe) => self.parse_unary_kw_stmt(Keyword::Observe, Stmt::Observe),
-            Token::Keyword(Keyword::Seal) => self.parse_unary_kw_stmt(Keyword::Seal, Stmt::Seal),
-            Token::Keyword(Keyword::Return) => self.parse_return_stmt().map(|s| s.map(Stmt::Return)),
-            Token::Ident(s) if s == "if" => self.parse_if_stmt(),
+        match &self.peek().node {
+            Token::Keyword(Keyword::Let) => {
+                let l = self.parse_let()?;
+                Ok(Spanned::new(Stmt::Let(l.node), l.span))
+            }
+            Token::Keyword(Keyword::Emit) => {
+                let e = self.parse_emit()?;
+                Ok(Spanned::new(Stmt::Emit(e.node), e.span))
+            }
+            Token::Keyword(Keyword::Assert) => {
+                let a = self.parse_assert()?;
+                Ok(Spanned::new(Stmt::Assert(a.node), a.span))
+            }
+            Token::Keyword(Keyword::If) => self.parse_if_stmt(),
+            Token::Keyword(Keyword::While) => self.parse_while_stmt(),
+            Token::Keyword(Keyword::Return) => self.parse_return_stmt(),
+            Token::Keyword(Keyword::Fail) => self.parse_fail_stmt(),
             _ => {
-                // expression statement
-                let e = self.parse_expr()?;
-                let semi = self.expect(Token::Semi)?;
-                let span = Span::new(e.span.start, semi.span.end);
-                Ok(Spanned::new(Stmt::Expr(e), span))
+                // expr ;
+                let start = self.peek().span.start;
+                let expr = self.parse_expr()?;
+                self.expect(Token::Semi)?;
+                let end = self.prev_span().end;
+                Ok(Spanned::new(
+                    Stmt::Expr(expr),
+                    Span::new(start, end),
+                ))
             }
         }
     }
 
-    fn parse_unary_kw_stmt<F>(
-        &mut self,
-        kw: Keyword,
-        wrap: F,
-    ) -> Result<Spanned<Stmt>, ParseError>
-    where
-        F: FnOnce(Spanned<Expr>) -> Stmt,
-    {
-        let k = self.expect_kw(kw)?;
-        let e = self.parse_expr()?;
-        let semi = self.expect(Token::Semi)?;
-        let span = Span::new(k.span.start, semi.span.end);
-        Ok(Spanned::new(wrap(e), span))
-    }
-
-    fn parse_let_stmt(&mut self) -> Result<Spanned<LetStmt>, ParseError> {
-        let kw = self.expect_kw(Keyword::Let)?;
-        let start = kw.span.start;
-
-        let name = self.expect_ident()?;
-
-        let ty = if self.peek_is(Token::Colon) {
-            self.bump();
-            Some(self.parse_type_ref()?)
-        } else {
-            None
-        };
-
-        self.expect(Token::Eq)?;
-        let expr = self.parse_expr()?;
-        let semi = self.expect(Token::Semi)?;
-        let end = semi.span.end;
-
-        Ok(Spanned::new(
-            LetStmt { name, ty, expr },
-            Span::new(start, end),
-        ))
-    }
-
-    fn parse_return_stmt(&mut self) -> Result<Spanned<Option<Spanned<Expr>>>, ParseError> {
-        let kw = self.expect_kw(Keyword::Return)?;
-        let start = kw.span.start;
-
-        // allow: return;
-        // allow: return <expr>;
-        let expr = if self.peek_is(Token::Semi) {
-            None
-        } else {
-            Some(self.parse_expr()?)
-        };
-
-        let semi = self.expect(Token::Semi)?;
-        let end = semi.span.end;
-
-        Ok(Spanned::new(expr, Span::new(start, end)))
-    }
-
     fn parse_if_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
-        // `if` is parsed as an identifier token with text "if"
-        let if_tok = self.expect_ident_text("if")?;
-        let start = if_tok.span.start;
-
+        let start = self.expect_kw(Keyword::If)?.span.start;
         let cond = self.parse_expr()?;
         let then_block = self.parse_block()?;
-
-        let else_block = if self.peek_ident_text("else") {
-            self.bump(); // consume ident "else"
-            Some(self.parse_block()?)
+        let mut else_block = None;
+        let end;
+        if self.peek_kw(Keyword::Else) {
+            self.bump(); // else
+            let eb = self.parse_block()?;
+            end = eb.span.end;
+            else_block = Some(eb);
         } else {
-            None
-        };
-
-        let end = else_block
-            .as_ref()
-            .map(|b| b.span.end)
-            .unwrap_or(then_block.span.end);
+            end = then_block.span.end;
+        }
 
         Ok(Spanned::new(
             Stmt::If(IfStmt {
@@ -544,131 +491,84 @@ impl Parser {
         ))
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Types
-    // ─────────────────────────────────────────────────────────────────────────
-
-    fn parse_type_ref(&mut self) -> Result<Spanned<TypeRef>, ParseError> {
-        // Minimal v0.1:
-        // - &T         => Ref(T)   (spelled as Ident "&"? we do not have '&' token; so omit)
-        // - [T]        => List(T)
-        // - fn(T,U)->R => Fn(...)
-        // - Name       => Named(Ident)
-        //
-        // Since lexer does not provide '&' token, we omit ref-types in concrete syntax
-        // for now; AST retains TypeRef::Ref for future extension.
-
-        let start = self.peek().span.start;
-
-        if self.peek_ident_text("fn") {
-            // parse a function type: fn ( T, U ) -> R
-            self.bump(); // ident "fn"
-            self.expect(Token::LParen)?;
-            let mut args = Vec::new();
-            if !self.peek_is(Token::RParen) {
-                loop {
-                    args.push(self.parse_type_ref()?);
-                    if self.peek_is(Token::Comma) {
-                        self.bump();
-                        continue;
-                    }
-                    break;
-                }
-            }
-            self.expect(Token::RParen)?;
-            self.expect(Token::Arrow)?;
-            let ret = self.parse_type_ref()?;
-            let end = ret.span.end;
-            return Ok(Spanned::new(
-                TypeRef::Fn(args, Box::new(ret)),
-                Span::new(start, end),
-            ));
-        }
-
-        if self.peek_is(Token::LBracket) {
-            self.bump();
-            let inner = self.parse_type_ref()?;
-            let rb = self.expect(Token::RBracket)?;
-            let end = rb.span.end;
-            return Ok(Spanned::new(
-                TypeRef::List(Box::new(inner)),
-                Span::new(start, end),
-            ));
-        }
-
-        // named type
-        let id = self.expect_ident()?;
-        let end = id.span.end;
-        Ok(Spanned::new(TypeRef::Named(id), Span::new(start, end)))
+    fn parse_while_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.expect_kw(Keyword::While)?.span.start;
+        let cond = self.parse_expr()?;
+        let body = self.parse_block()?;
+        let end = body.span.end;
+        Ok(Spanned::new(
+            Stmt::While(WhileStmt { cond, body }),
+            Span::new(start, end),
+        ))
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Expressions (precedence climbing)
-    // ─────────────────────────────────────────────────────────────────────────
+    fn parse_return_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.expect_kw(Keyword::Return)?.span.start;
+        let mut value = None;
+        if !self.peek_is(&Token::Semi) {
+            value = Some(self.parse_expr()?);
+        }
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(
+            Stmt::Return(ReturnStmt { value }),
+            Span::new(start, end),
+        ))
+    }
+
+    fn parse_fail_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.expect_kw(Keyword::Fail)?.span.start;
+        let msg = self.parse_literal()?;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(
+            Stmt::Fail(FailStmt { msg }),
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Expressions
+    // ─────────────────────────────────────────────────────────────────────────────
 
     fn parse_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
         self.parse_expr_bp(0)
     }
 
     fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Spanned<Expr>, ParseError> {
-        let mut lhs = self.parse_primary_expr()?;
+        let mut lhs = self.parse_primary()?;
 
         loop {
-            // postfix: field access
-            if self.peek_is(Token::Dot) {
-                self.bump();
-                let name = self.expect_ident()?;
-                let span = Span::new(lhs.span.start, name.span.end);
-                lhs = Spanned::new(
-                    Expr::Field(FieldExpr {
-                        base: Box::new(lhs),
-                        name,
-                    }),
-                    span,
-                );
-                continue;
-            }
-
-            // postfix: call
-            if self.peek_is(Token::LParen) {
-                let call = self.parse_call_suffix(lhs)?;
-                lhs = call;
-                continue;
-            }
-
-            // binary
-            let op = match self.peek().node {
-                Token::Plus => Some(BinOp::Add),
-                Token::Minus => Some(BinOp::Sub),
-                Token::Star => Some(BinOp::Mul),
-                Token::Slash => Some(BinOp::Div),
-                Token::EqEq => Some(BinOp::Eq),
-                Token::Lt => Some(BinOp::Lt),
-                Token::Lte => Some(BinOp::Le),
-                Token::Gt => Some(BinOp::Gt),
-                Token::Gte => Some(BinOp::Ge),
-                Token::AndAnd => Some(BinOp::And),
-                Token::OrOr => Some(BinOp::Or),
-                _ => None,
+            let op = match self.peek().node.clone() {
+                Token::Plus => BinOp::Add,
+                Token::Minus => BinOp::Sub,
+                Token::Star => BinOp::Mul,
+                Token::Slash => BinOp::Div,
+                Token::EqEq => BinOp::Eq,
+                Token::BangEq => BinOp::Ne,
+                Token::Lt => BinOp::Lt,
+                Token::LtEq => BinOp::Le,
+                Token::Gt => BinOp::Gt,
+                Token::GtEq => BinOp::Ge,
+                Token::AndAnd => BinOp::And,
+                Token::OrOr => BinOp::Or,
+                _ => break,
             };
 
-            let Some(op) = op else { break };
-
-            let (l_bp, r_bp) = infix_binding_power(op);
+            let (l_bp, r_bp) = op.binding_power();
             if l_bp < min_bp {
                 break;
             }
 
-            let op_tok = self.bump();
+            let op_span = self.bump().span;
             let rhs = self.parse_expr_bp(r_bp)?;
-
             let span = Span::new(lhs.span.start, rhs.span.end);
             lhs = Spanned::new(
                 Expr::Binary(BinaryExpr {
                     op,
-                    left: Box::new(lhs),
-                    right: Box::new(rhs),
-                    op_span: op_tok.span,
+                    op_span,
+                    lhs,
+                    rhs,
                 }),
                 span,
             );
@@ -677,149 +577,89 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn parse_call_suffix(&mut self, callee: Spanned<Expr>) -> Result<Spanned<Expr>, ParseError> {
-        let start = callee.span.start;
-        self.expect(Token::LParen)?;
-        let mut args = Vec::new();
-        if !self.peek_is(Token::RParen) {
-            loop {
-                args.push(self.parse_expr()?);
-                if self.peek_is(Token::Comma) {
-                    self.bump();
-                    continue;
-                }
-                break;
+    fn parse_primary(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        let t = self.peek().clone();
+        match t.node {
+            Token::Int(_) | Token::StrLit(_) | Token::BoolLit(_) => {
+                let lit = self.parse_literal()?;
+                Ok(Spanned::new(Expr::Literal(lit), lit.span))
             }
+            Token::Ident(_) => {
+                let id = self.expect_ident()?;
+                Ok(Spanned::new(Expr::Ident(id.clone()), id.span))
+            }
+            Token::LParen => {
+                let start = self.bump().span.start;
+                let e = self.parse_expr()?;
+                let end = self.expect(Token::RParen)?.span.end;
+                Ok(Spanned::new(e.node, Span::new(start, end)))
+            }
+            _ => Err(self.err_here("expected expression")),
         }
-        let rp = self.expect(Token::RParen)?;
-        let end = rp.span.end;
-
-        Ok(Spanned::new(
-            Expr::Call(CallExpr {
-                callee: Box::new(callee),
-                args,
-            }),
-            Span::new(start, end),
-        ))
-    }
-
-    fn parse_primary_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
-        let t = self.peek();
-
-        // literals
-        if matches!(t.node, Token::Int(_) | Token::String(_) | Token::Bool(_)) {
-            let lit = self.parse_literal()?;
-            let span = lit.span;
-            return Ok(Spanned::new(Expr::Literal(lit.node), span));
-        }
-
-        // parenthesized
-        if self.peek_is(Token::LParen) {
-            self.bump();
-            let e = self.parse_expr()?;
-            self.expect(Token::RParen)?;
-            return Ok(e);
-        }
-
-        // proc path as a callee/ident-like expression:
-        // We represent `K::foo` as Ident("K::foo") at v0.1 expression level to avoid
-        // introducing a separate expression variant. Calls like `K::foo()` remain valid.
-        if matches!(t.node, Token::Keyword(Keyword::K | Keyword::Q | Keyword::Phi)) {
-            let path = self.parse_proc_path()?;
-            let span = path.span;
-            let text = match path.node.regime.node {
-                Regime::K => format!("K::{}", path.node.name.text),
-                Regime::Q => format!("Q::{}", path.node.name.text),
-                Regime::Phi => format!("Φ::{}", path.node.name.text),
-            };
-            let id = Ident::new(text, span);
-            return Ok(Spanned::new(Expr::Ident(id.clone()), id.span));
-        }
-
-        // identifier
-        if let Token::Ident(_) = &t.node {
-            let id = self.expect_ident()?;
-            let span = id.span;
-            return Ok(Spanned::new(Expr::Ident(id), span));
-        }
-
-        Err(self.err_here(
-            ParseErrorKind::UnexpectedToken,
-            "expected expression",
-        ))
     }
 
     fn parse_literal(&mut self) -> Result<Spanned<Literal>, ParseError> {
-        let t = self.peek();
-        match &t.node {
-            Token::Int(n) => {
-                let tok = self.bump();
-                Ok(Spanned::new(Literal::Int(*n), tok.span))
+        let t = self.peek().clone();
+        match t.node {
+            Token::Int(v) => {
+                let sp = self.bump().span;
+                Ok(Spanned::new(Literal::Int(v), sp))
             }
-            Token::String(s) => {
-                let tok = self.bump();
-                Ok(Spanned::new(Literal::String(s.clone()), tok.span))
+            Token::StrLit(s) => {
+                let sp = self.bump().span;
+                Ok(Spanned::new(Literal::Str(s), sp))
             }
-            Token::Bool(b) => {
-                let tok = self.bump();
-                Ok(Spanned::new(Literal::Bool(*b), tok.span))
+            Token::BoolLit(b) => {
+                let sp = self.bump().span;
+                Ok(Spanned::new(Literal::Bool(b), sp))
             }
-            _ => Err(self.err_here(
-                ParseErrorKind::ExpectedLiteral,
-                "expected literal",
-            )),
+            _ => Err(self.err_here("expected literal")),
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Token utilities
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Helpers
+    // ─────────────────────────────────────────────────────────────────────────────
 
     fn peek(&self) -> &Spanned<Token> {
-        self.tokens
-            .get(self.i)
-            .unwrap_or_else(|| self.tokens.last().expect("token stream must be non-empty"))
+        self.toks.get(self.i).unwrap_or_else(|| self.toks.last().expect("non-empty token stream"))
     }
 
     fn bump(&mut self) -> Spanned<Token> {
         let t = self.peek().clone();
-        if !self.is_eof() {
-            self.i += 1;
-        }
+        self.i = (self.i + 1).min(self.toks.len());
         t
+    }
+
+    fn prev_span(&self) -> Span {
+        if self.i == 0 {
+            Span::new(0, 0)
+        } else {
+            self.toks[self.i.saturating_sub(1)].span
+        }
     }
 
     fn is_eof(&self) -> bool {
         matches!(self.peek().node, Token::Eof)
     }
 
-    fn last_end(&self) -> u32 {
-        self.tokens.last().map(|t| t.span.end).unwrap_or(0)
+    fn peek_is(&self, want: &Token) -> bool {
+        &self.peek().node == want
     }
 
-    fn peek_is(&self, want: Token) -> bool {
-        self.peek().node == want
-    }
-
-    fn peek_is_kw(&self, want: Keyword) -> bool {
+    fn peek_kw(&self, want: Keyword) -> bool {
         matches!(self.peek().node, Token::Keyword(k) if k == want)
-    }
-
-    fn peek_ident_text(&self, text: &str) -> bool {
-        matches!(&self.peek().node, Token::Ident(s) if s == text)
     }
 
     fn expect(&mut self, want: Token) -> Result<Spanned<Token>, ParseError> {
         let t = self.peek().clone();
         if t.node == want {
             Ok(self.bump())
-        } else if matches!(t.node, Token::Eof) {
-            Err(self.err_here(ParseErrorKind::UnexpectedEof, "unexpected end of file"))
         } else {
-            Err(self.err_here(
-                ParseErrorKind::ExpectedToken,
-                format!("expected token: {want:?}").as_str(),
-            ))
+            Err(ParseError {
+                message: format!("expected {:?}, found {:?}", want, t.node),
+                span: t.span,
+            })
         }
     }
 
@@ -827,66 +667,31 @@ impl Parser {
         let t = self.peek().clone();
         match &t.node {
             Token::Keyword(k) if *k == want => Ok(self.bump()),
-            Token::Eof => Err(self.err_here(ParseErrorKind::UnexpectedEof, "unexpected end of file")),
-            _ => Err(self.err_here(
-                ParseErrorKind::ExpectedToken,
-                "expected keyword",
-            )),
+            _ => Err(ParseError {
+                message: format!("expected keyword {:?}, found {:?}", want, t.node),
+                span: t.span,
+            }),
         }
     }
 
     fn expect_ident(&mut self) -> Result<Ident, ParseError> {
         let t = self.peek().clone();
-        match &t.node {
+        match t.node {
             Token::Ident(s) => {
-                self.bump();
-                Ok(Ident::new(s.clone(), t.span))
+                let sp = self.bump().span;
+                Ok(Ident { name: s, span: sp })
             }
-            Token::Eof => Err(self.err_here(ParseErrorKind::UnexpectedEof, "unexpected end of file")),
-            _ => Err(self.err_here(ParseErrorKind::ExpectedIdent, "expected identifier")),
+            _ => Err(ParseError {
+                message: "expected identifier".to_string(),
+                span: t.span,
+            }),
         }
     }
 
-    fn expect_ident_text(&mut self, text: &str) -> Result<Ident, ParseError> {
-        let t = self.peek().clone();
-        match &t.node {
-            Token::Ident(s) if s == text => {
-                self.bump();
-                Ok(Ident::new(s.clone(), t.span))
-            }
-            _ => Err(self.err_here(ParseErrorKind::ExpectedIdent, "expected identifier")),
+    fn err_here(&self, msg: &str) -> ParseError {
+        ParseError {
+            message: msg.to_string(),
+            span: self.peek().span,
         }
-    }
-
-    fn err_here(&self, kind: ParseErrorKind, msg: &str) -> ParseError {
-        let s = self.peek().span;
-        ParseError::new(kind, s, msg)
-    }
-
-    fn err_at(&self, kind: ParseErrorKind, span: Span, msg: &str) -> ParseError {
-        ParseError::new(kind, span, msg)
-    }
-}
-
-// precedence table
-fn infix_binding_power(op: BinOp) -> (u8, u8) {
-    match op {
-        BinOp::Or => (1, 2),
-        BinOp::And => (3, 4),
-        BinOp::Eq | BinOp::Neq => (5, 6),
-        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => (7, 8),
-        BinOp::Add | BinOp::Sub => (9, 10),
-        BinOp::Mul | BinOp::Div => (11, 12),
-    }
-}
-
-// helper: map on Spanned<T> without importing traits
-trait SpannedMap<T> {
-    fn map<U>(self, f: impl FnOnce(T) -> U) -> Spanned<U>;
-}
-
-impl<T> SpannedMap<T> for Spanned<T> {
-    fn map<U>(self, f: impl FnOnce(T) -> U) -> Spanned<U> {
-        Spanned::new(f(self.node), self.span)
     }
 }
