@@ -1,0 +1,17 @@
+// examples/K/k_empty_main.ds
+//
+// Purpose:
+// - Verifies that an empty K-regime entrypoint is valid
+// - Confirms the compiler emits a native executable that:
+//     * links successfully
+//     * runs successfully
+//     * returns exit code 0
+//
+// There are intentionally NO effects in this program.
+//
+// Expected behavior when executed:
+//   - No output
+//   - Process exits with status code 0
+
+K main {
+}
