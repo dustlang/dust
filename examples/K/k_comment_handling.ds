@@ -1,0 +1,21 @@
+// examples/K/k_comment_handling.ds
+//
+// Purpose:
+// - Verifies lexer correctness for both line and block comments
+// - Ensures comments are treated as whitespace and do not affect semantics
+//
+// Expected behavior when executed:
+//   Comments OK
+
+K main {
+    // Line comment: next emit must still execute
+    emit "Comments OK";
+
+    /*
+      Block comment:
+      - may span multiple lines
+      - must be ignored by the compiler
+    */
+
+    // Another comment at end of file should not matter
+}
