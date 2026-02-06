@@ -1,22 +1,17 @@
 // crates/dust_frontend/src/ast.rs
 //
-// DPL v0.1 AST for the Dust frontend.
+// DPL v0.1 — Abstract Syntax Tree
 //
-// This AST is intentionally shaped to match the *current* parser implementation in
-// crates/dust_frontend/src/parser.rs (FileAst/ForgeDecl/items as Spanned<Item>,
-// Expr variants used by the parser, etc).
-//
-// © 2026 Dust LLC
+// This AST is the shared contract between the frontend (lexer/parser) and the
+// semantic/lowering passes.
 
 use std::fmt;
 
-//
 // ─────────────────────────────────────────────────────────────────────────────
-// Source spans
+// Spans
 // ─────────────────────────────────────────────────────────────────────────────
-//
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Span {
     pub start: u32,
     pub end: u32,
@@ -27,12 +22,6 @@ impl Span {
         Self { start, end }
     }
 }
-
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// Spanned wrapper
-// ─────────────────────────────────────────────────────────────────────────────
-//
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Spanned<T> {
@@ -46,11 +35,9 @@ impl<T> Spanned<T> {
     }
 }
 
-//
 // ─────────────────────────────────────────────────────────────────────────────
 // Identifiers
 // ─────────────────────────────────────────────────────────────────────────────
-//
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Ident {
@@ -73,11 +60,9 @@ impl fmt::Display for Ident {
     }
 }
 
-//
 // ─────────────────────────────────────────────────────────────────────────────
 // Regimes
 // ─────────────────────────────────────────────────────────────────────────────
-//
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Regime {
@@ -86,11 +71,9 @@ pub enum Regime {
     Phi,
 }
 
-//
 // ─────────────────────────────────────────────────────────────────────────────
-// Top-level file + forge + items
+// Program structure
 // ─────────────────────────────────────────────────────────────────────────────
-//
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileAst {
@@ -110,11 +93,9 @@ pub enum Item {
     Bind(BindDecl),
 }
 
-//
 // ─────────────────────────────────────────────────────────────────────────────
-// Declarations
+// Shapes
 // ─────────────────────────────────────────────────────────────────────────────
-//
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapeDecl {
@@ -128,13 +109,23 @@ pub struct FieldDecl {
     pub ty: Spanned<TypeRef>,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Processes
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcDecl {
+    pub sig: Spanned<ProcSig>,
+    pub body: Spanned<Block>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcSig {
     pub path: Spanned<ProcPath>,
     pub params: Vec<Spanned<ParamDecl>>,
+    pub uses: Vec<Spanned<UsesClause>>,
     pub ret: Option<Spanned<TypeRef>>,
-    pub contracts: Vec<Spanned<ContractDecl>>,
-    pub body: Spanned<Block>,
+    pub qualifiers: Vec<Spanned<ProcQualifier>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,9 +141,8 @@ pub struct ParamDecl {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BindDecl {
-    pub name: Ident,
-    pub target: Spanned<ProcPath>,
+pub struct UsesClause {
+    pub resource: Ident,
     pub args: Vec<Spanned<NamedArg>>,
 }
 
@@ -162,24 +152,93 @@ pub struct NamedArg {
     pub value: Spanned<Literal>,
 }
 
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// Contracts
-// ─────────────────────────────────────────────────────────────────────────────
-//
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ContractDecl {
-    Requires(Spanned<Expr>),
-    Ensures(Spanned<Expr>),
-    Uses(Ident),
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ProcQualifier {
+    Linear,
 }
 
-//
+// ─────────────────────────────────────────────────────────────────────────────
+// Bindings + contracts
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BindDecl {
+    pub source: Spanned<ProcPathRef>,
+    pub target: Spanned<ProcPathRef>,
+    pub contract: Spanned<ContractBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcPathRef {
+    Qualified(ProcPath),
+    Unqualified(Ident),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractBlock {
+    pub clauses: Vec<Spanned<ContractClause>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractClause {
+    pub key: Ident,
+    pub op: Spanned<ContractOp>,
+    pub value: Spanned<ContractValue>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ContractOp {
+    EqEq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContractValue {
+    Ident(Ident),
+    Literal(Literal),
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PrimitiveType {
+    Unit,
+    Bool,
+    I64,
+    U64,
+    F64,
+    String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeRef {
+    Primitive(PrimitiveType),
+    Named(Ident),
+    Array {
+        elem: Box<Spanned<TypeRef>>,
+        len: usize,
+    },
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Literals
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Literal {
+    Int(i64),
+    Bool(bool),
+    String(String),
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Blocks + statements
 // ─────────────────────────────────────────────────────────────────────────────
-//
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
@@ -189,85 +248,60 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Let(LetStmt),
-    Constrain(Spanned<Expr>),
-    Prove(Spanned<Expr>),
-    Emit(Spanned<Expr>),
-    Observe(Spanned<Expr>),
-    Seal(Spanned<Expr>),
-    Return(Option<Spanned<Expr>>),
-    If(IfStmt),
-    Expr(Spanned<Expr>),
+    Constrain(ConstrainStmt),
+    Prove(ProveStmt),
+    Effect(EffectStmt),
+    Return(ReturnStmt),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetStmt {
     pub name: Ident,
-    pub ty: Option<Spanned<TypeRef>>,
     pub expr: Spanned<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct IfStmt {
-    pub cond: Spanned<Expr>,
-    pub then_block: Spanned<Block>,
-    pub else_block: Option<Spanned<Block>>,
+pub struct ConstrainStmt {
+    pub predicate: Spanned<Expr>,
 }
-
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
-//
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum TypeRef {
-    Named(Ident),
-    Unit,
-    Bool,
-    I64,
-    U64,
-    F64,
-    String,
+pub struct ProveStmt {
+    pub name: Ident,
+    pub from: Spanned<Expr>,
 }
-
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// Literals
-// ─────────────────────────────────────────────────────────────────────────────
-//
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Literal {
-    Unit,
-    Bool(bool),
-    Int(i64),
-    UInt(u64),
-    Float(f64),
-    String(String),
+pub struct EffectStmt {
+    pub kind: Spanned<EffectKind>,
+    pub payload: Spanned<Expr>,
 }
 
-//
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum EffectKind {
+    Observe,
+    Emit,
+    Seal,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReturnStmt {
+    pub expr: Spanned<Expr>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Expressions (must match parser.rs usage)
+// Expressions
 // ─────────────────────────────────────────────────────────────────────────────
-//
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Literal),
     Ident(Ident),
-    Binary(Box<BinaryExpr>),
-    Field(Box<FieldExpr>),
     Paren(Box<Spanned<Expr>>),
-    Block(Block),
-    Call(Box<CallExpr>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct BinaryExpr {
-    pub op: BinOp,
-    pub lhs: Spanned<Expr>,
-    pub rhs: Spanned<Expr>,
+    Binary(Box<Spanned<BinaryExpr>>),
+    Call(Box<Spanned<CallExpr>>),
+    Field(Box<Spanned<FieldExpr>>),
+    StructLit(Box<Spanned<StructLitExpr>>),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -277,7 +311,6 @@ pub enum BinOp {
     Mul,
     Div,
     Eq,
-    Ne,
     Lt,
     Le,
     Gt,
@@ -287,13 +320,32 @@ pub enum BinOp {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FieldExpr {
-    pub base: Spanned<Expr>,
-    pub field: Ident,
+pub struct BinaryExpr {
+    pub op: Spanned<BinOp>,
+    pub lhs: Spanned<Expr>,
+    pub rhs: Spanned<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallExpr {
     pub callee: Spanned<Expr>,
     pub args: Vec<Spanned<Expr>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldExpr {
+    pub base: Spanned<Expr>,
+    pub field: Ident,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructLitExpr {
+    pub ty_name: Ident,
+    pub inits: Vec<Spanned<FieldInit>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldInit {
+    pub name: Ident,
+    pub expr: Spanned<Expr>,
 }
