@@ -322,4 +322,4 @@ impl Parser {
             span: self.peek().span,
         }
     }
-}}
+}
