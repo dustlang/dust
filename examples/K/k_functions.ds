@@ -1,0 +1,61 @@
+// examples/K/k_functions.ds
+//
+// Demonstrates K Regime v0.2 function definitions
+//
+// Regime: K (Classical / Deterministic)
+
+// Function with parameters and return type
+K factorial(K[Int] n) -> K[Int] {
+    if n <= 1 {
+        1
+    } else {
+        n * factorial(n - 1)
+    }
+}
+
+// Function with multiple parameters
+K add(K[Int] a, K[Int] b) -> K[Int] {
+    a + b
+}
+
+// Procedure (returns unit)
+K greet(K[String] name) -> K[Unit] {
+    emit "Hello, {name}!";
+}
+
+// Function with local variables
+K fibonacci(K[Int] n) -> K[Int] {
+    mut let a: K[Int] = 0;
+    mut let b: K[Int] = 1;
+    
+    if n == 0 {
+        return a;
+    }
+    
+    mut let i: K[Int] = 0;
+    while i < n - 1 {
+        let temp: K[Int] = a + b;
+        a = b;
+        b = temp;
+        i = i + 1;
+    }
+    
+    b
+}
+
+K main {
+    // Call factorial
+    let five_fact: K[Int] = factorial(5);
+    emit "5! = {five_fact}";
+    
+    // Call add
+    let sum: K[Int] = add(10, 20);
+    emit "10 + 20 = {sum}";
+    
+    // Call greet
+    greet("World");
+    
+    // Call fibonacci
+    let fib: K[Int] = fibonacci(10);
+    emit "Fibonacci(10) = {fib}";
+}

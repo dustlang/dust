@@ -38,6 +38,7 @@ pub enum Keyword {
     Contract,
     Uses,
     Let,
+    Mut,
     Constrain,
     Prove,
     From,
@@ -46,37 +47,47 @@ pub enum Keyword {
     Seal,
     Return,
     Linear,
+    If,
+    Else,
+    For,
+    While,
+    Break,
+    Continue,
+    In,
+    Match,
     // Regimes
     K,
     Q,
     Phi, // Φ
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Atoms
     Ident(String),
     Int(i64),
+    Float(f64),
+    Char(char),
     String(String),
     Bool(bool),
     Keyword(Keyword),
 
     // Punctuation / operators
-    LBrace,     // {
-    RBrace,     // }
-    LParen,     // (
-    RParen,     // )
-    LBracket,   // [
-    RBracket,   // ]
-    Colon,      // :
-    Semi,       // ;
-    Comma,      // ,
-    Dot,        // .
-    Eq,         // =
-    Plus,       // +
-    Minus,      // -
-    Star,       // *
-    Slash,      // /
+    LBrace,   // {
+    RBrace,   // }
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    Colon,    // :
+    Semi,     // ;
+    Comma,    // ,
+    Dot,      // .
+    Eq,       // =
+    Plus,     // +
+    Minus,    // -
+    Star,     // *
+    Slash,    // /
 
     ColonColon, // ::
     Arrow,      // ->
@@ -87,8 +98,21 @@ pub enum Token {
     Gte,        // >=
     AndAnd,     // &&
     OrOr,       // ||
+    DotDot,     // ..
+    Bang,       // !
+    Underscore, // _
+    FatArrow,   // =>
 
     Eof,
+}
+
+impl Token {
+    pub fn unwrap_ident(self) -> String {
+        match self {
+            Token::Ident(s) => s,
+            _ => panic!("Token is not an Ident"),
+        }
+    }
 }
 
 pub struct Lexer<'a> {
@@ -148,7 +172,7 @@ impl<'a> Lexer<'a> {
             }
             b';' => return Ok(self.one(Token::Semi)),
             b',' => return Ok(self.one(Token::Comma)),
-            b'.' => return Ok(self.one(Token::Dot)),
+            b'_' => return Ok(self.one(Token::Underscore)),
             b'+' => return Ok(self.one(Token::Plus)),
             b'*' => return Ok(self.one(Token::Star)),
             b'/' => return Ok(self.one(Token::Slash)),
@@ -165,6 +189,10 @@ impl<'a> Lexer<'a> {
                 if self.peek_u8() == Some(b'=') {
                     self.bump();
                     return Ok(self.span(Token::EqEq, start, self.i as u32));
+                }
+                if self.peek_u8() == Some(b'>') {
+                    self.bump();
+                    return Ok(self.span(Token::FatArrow, start, self.i as u32));
                 }
                 return Ok(self.span(Token::Eq, start, self.i as u32));
             }
@@ -200,8 +228,41 @@ impl<'a> Lexer<'a> {
                 }
                 return Err(self.err(LexErrorKind::UnexpectedChar('|'), start, self.i as u32));
             }
+            b'.' => {
+                // Check for range operator ..
+                if self.peek2_u8() == Some(b'.') {
+                    self.bump();
+                    self.bump();
+                    return Ok(self.span(Token::DotDot, start, self.i as u32));
+                }
+                return Ok(self.one(Token::Dot));
+            }
+            b'!' => {
+                self.bump();
+                return Ok(self.span(Token::Bang, start, self.i as u32));
+            }
             b'"' => return self.lex_string(),
-            b'0'..=b'9' => return self.lex_int(),
+            b'\'' => return self.lex_char(),
+            b'0'..=b'9' => {
+                // Check if it's a float (digit followed by dot)
+                let save = self.i;
+                // Read first digit
+                self.bump();
+                // Read more digits
+                while let Some(b) = self.peek_u8() {
+                    if (b'0'..=b'9').contains(&b) {
+                        self.bump();
+                    } else if b == b'.' {
+                        // It's a float!
+                        return self.lex_float();
+                    } else {
+                        break;
+                    }
+                }
+                // Not a float, restore and lex as int
+                self.i = save;
+                return self.lex_int();
+            }
             _ => {}
         }
 
@@ -235,7 +296,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn err(&self, kind: LexErrorKind, start: u32, end: u32) -> LexError {
-        LexError { kind, span: Span::new(start, end) }
+        LexError {
+            kind,
+            span: Span::new(start, end),
+        }
     }
 
     fn skip_ws_and_comments(&mut self) -> Result<(), LexError> {
@@ -244,7 +308,8 @@ impl<'a> Lexer<'a> {
 
             // Line comment
             if self.peek_u8() == Some(b'/') && self.peek2_u8() == Some(b'/') {
-                self.bump(); self.bump();
+                self.bump();
+                self.bump();
                 while let Some(c) = self.peek_u8() {
                     self.bump();
                     if c == b'\n' {
@@ -257,13 +322,19 @@ impl<'a> Lexer<'a> {
             // Block comment (non-nesting)
             if self.peek_u8() == Some(b'/') && self.peek2_u8() == Some(b'*') {
                 let start = self.i as u32;
-                self.bump(); self.bump();
+                self.bump();
+                self.bump();
                 loop {
                     if self.i >= self.len {
-                        return Err(self.err(LexErrorKind::UnterminatedBlockComment, start, self.i as u32));
+                        return Err(self.err(
+                            LexErrorKind::UnterminatedBlockComment,
+                            start,
+                            self.i as u32,
+                        ));
                     }
                     if self.peek_u8() == Some(b'*') && self.peek2_u8() == Some(b'/') {
-                        self.bump(); self.bump();
+                        self.bump();
+                        self.bump();
                         break;
                     }
                     self.bump_char();
@@ -294,13 +365,110 @@ impl<'a> Lexer<'a> {
                 let digit = (b - b'0') as i64;
                 self.bump();
                 val = val
-                    .checked_mul(10).ok_or_else(|| self.err(LexErrorKind::IntOverflow, start, self.i as u32))?
-                    .checked_add(digit).ok_or_else(|| self.err(LexErrorKind::IntOverflow, start, self.i as u32))?;
+                    .checked_mul(10)
+                    .ok_or_else(|| self.err(LexErrorKind::IntOverflow, start, self.i as u32))?
+                    .checked_add(digit)
+                    .ok_or_else(|| self.err(LexErrorKind::IntOverflow, start, self.i as u32))?;
             } else {
                 break;
             }
         }
         Ok(self.span(Token::Int(val), start, self.i as u32))
+    }
+
+    fn lex_float(&mut self) -> Result<Spanned<Token>, LexError> {
+        let start = self.i as u32;
+
+        // Parse integer part first
+        let mut int_part: f64 = 0.0;
+        while let Some(b) = self.peek_u8() {
+            if (b'0'..=b'9').contains(&b) {
+                let digit = (b - b'0') as f64;
+                self.bump();
+                int_part = int_part * 10.0 + digit;
+            } else {
+                break;
+            }
+        }
+
+        // Must have decimal point
+        if self.peek_u8() != Some(b'.') {
+            return Err(self.err(LexErrorKind::UnexpectedChar('.'), start, self.i as u32));
+        }
+        self.bump(); // consume '.'
+
+        // Parse fractional part
+        let mut frac_part: f64 = 0.0;
+        let mut frac_div: f64 = 1.0;
+        while let Some(b) = self.peek_u8() {
+            if (b'0'..=b'9').contains(&b) {
+                let digit = (b - b'0') as f64;
+                self.bump();
+                frac_div *= 10.0;
+                frac_part = frac_part * 10.0 + digit;
+            } else {
+                break;
+            }
+        }
+
+        let val = int_part + (frac_part / frac_div);
+        Ok(self.span(Token::Float(val), start, self.i as u32))
+    }
+
+    fn lex_char(&mut self) -> Result<Spanned<Token>, LexError> {
+        let start = self.i as u32;
+        self.bump(); // consume opening '
+
+        let ch = if self.peek_u8() == Some(b'\\') {
+            self.bump(); // consume '\'
+            match self.peek_u8() {
+                Some(b'n') => {
+                    self.bump();
+                    '\n'
+                }
+                Some(b't') => {
+                    self.bump();
+                    '\t'
+                }
+                Some(b'r') => {
+                    self.bump();
+                    '\r'
+                }
+                Some(b'\'') => {
+                    self.bump();
+                    '\''
+                }
+                Some(b'\\') => {
+                    self.bump();
+                    '\\'
+                }
+                Some(c) => {
+                    self.bump();
+                    c as char
+                }
+                None => {
+                    return Err(self.err(LexErrorKind::UnterminatedString, start, self.i as u32))
+                }
+            }
+        } else {
+            match self.peek_char() {
+                Some(c) if c != '\'' => {
+                    self.bump_char();
+                    c
+                }
+                _ => {
+                    return Err(self.err(LexErrorKind::UnexpectedChar('\''), start, self.i as u32))
+                }
+            }
+        };
+
+        // Expect closing '
+        if self.peek_u8() != Some(b'\'') {
+            return Err(self.err(LexErrorKind::UnterminatedString, start, self.i as u32));
+        }
+        self.bump(); // consume closing '
+
+        Ok(self.span(Token::Char(ch), start, self.i as u32))
     }
 
     fn lex_string(&mut self) -> Result<Spanned<Token>, LexError> {
@@ -321,7 +489,11 @@ impl<'a> Lexer<'a> {
                 '\\' => {
                     self.bump_char();
                     if self.i >= self.len {
-                        return Err(self.err(LexErrorKind::UnterminatedString, start, self.i as u32));
+                        return Err(self.err(
+                            LexErrorKind::UnterminatedString,
+                            start,
+                            self.i as u32,
+                        ));
                     }
                     let esc = self.peek_char().unwrap();
                     self.bump_char();
@@ -332,7 +504,11 @@ impl<'a> Lexer<'a> {
                         't' => out.push('\t'),
                         'r' => out.push('\r'),
                         other => {
-                            return Err(self.err(LexErrorKind::InvalidEscape(other), start, self.i as u32));
+                            return Err(self.err(
+                                LexErrorKind::InvalidEscape(other),
+                                start,
+                                self.i as u32,
+                            ));
                         }
                     }
                 }
@@ -370,6 +546,7 @@ impl<'a> Lexer<'a> {
             "contract" => Token::Keyword(Keyword::Contract),
             "uses" => Token::Keyword(Keyword::Uses),
             "let" => Token::Keyword(Keyword::Let),
+            "mut" => Token::Keyword(Keyword::Mut),
             "constrain" => Token::Keyword(Keyword::Constrain),
             "prove" => Token::Keyword(Keyword::Prove),
             "from" => Token::Keyword(Keyword::From),
@@ -378,6 +555,14 @@ impl<'a> Lexer<'a> {
             "seal" => Token::Keyword(Keyword::Seal),
             "return" => Token::Keyword(Keyword::Return),
             "linear" => Token::Keyword(Keyword::Linear),
+            "if" => Token::Keyword(Keyword::If),
+            "else" => Token::Keyword(Keyword::Else),
+            "for" => Token::Keyword(Keyword::For),
+            "while" => Token::Keyword(Keyword::While),
+            "break" => Token::Keyword(Keyword::Break),
+            "continue" => Token::Keyword(Keyword::Continue),
+            "in" => Token::Keyword(Keyword::In),
+            "match" => Token::Keyword(Keyword::Match),
             "K" => Token::Keyword(Keyword::K),
             "Q" => Token::Keyword(Keyword::Q),
             "true" => Token::Bool(true),

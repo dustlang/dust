@@ -23,6 +23,12 @@ impl Span {
     }
 }
 
+impl Default for Span {
+    fn default() -> Self {
+        Self { start: 0, end: 0 }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Spanned<T> {
     pub node: T,
@@ -209,10 +215,18 @@ pub enum ContractValue {
 pub enum PrimitiveType {
     Unit,
     Bool,
+    I8,
+    I16,
+    I32,
     I64,
+    U8,
+    U16,
+    U32,
     U64,
+    F32,
     F64,
     String,
+    Char,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -232,8 +246,10 @@ pub enum TypeRef {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Int(i64),
+    Float(f64),
     Bool(bool),
     String(String),
+    Char(char),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -248,15 +264,82 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Let(LetStmt),
+    MutLet(MutLetStmt),
     Constrain(ConstrainStmt),
     Prove(ProveStmt),
     Effect(EffectStmt),
     Return(ReturnStmt),
+    If(IfStmt),
+    For(ForStmt),
+    While(WhileStmt),
+    Break(BreakStmt),
+    Continue(ContinueStmt),
+    Expr(ExprStmt),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetStmt {
     pub name: Ident,
+    pub ty: Option<Spanned<TypeRef>>,
+    pub expr: Spanned<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MutLetStmt {
+    pub name: Ident,
+    pub ty: Option<Spanned<TypeRef>>,
+    pub expr: Spanned<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IfStmt {
+    pub condition: Spanned<Expr>,
+    pub then_block: Spanned<Block>,
+    pub else_block: Option<Spanned<Block>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForStmt {
+    pub var: Ident,
+    pub start: Spanned<Expr>,
+    pub end: Spanned<Expr>,
+    pub body: Spanned<Block>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhileStmt {
+    pub condition: Spanned<Expr>,
+    pub body: Spanned<Block>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BreakStmt;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContinueStmt;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchExpr {
+    pub expr: Spanned<Expr>,
+    pub arms: Vec<Spanned<MatchArm>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Spanned<MatchPattern>,
+    pub body: Spanned<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MatchPattern {
+    Literal(Literal),
+    Ident(Ident),
+    Wildcard,
+    Or(Box<Spanned<MatchPattern>>, Box<Spanned<MatchPattern>>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExprStmt {
     pub expr: Spanned<Expr>,
 }
 
@@ -298,10 +381,15 @@ pub enum Expr {
     Literal(Literal),
     Ident(Ident),
     Paren(Box<Spanned<Expr>>),
+    Block(Block),
     Binary(Box<Spanned<BinaryExpr>>),
+    Unary(Box<Spanned<UnaryExpr>>),
     Call(Box<Spanned<CallExpr>>),
     Field(Box<Spanned<FieldExpr>>),
+    Index(Box<Spanned<IndexExpr>>),
+    Array(Vec<Spanned<Expr>>),
     StructLit(Box<Spanned<StructLitExpr>>),
+    Match(Box<Spanned<MatchExpr>>),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -311,12 +399,31 @@ pub enum BinOp {
     Mul,
     Div,
     Eq,
+    Ne,
     Lt,
     Le,
     Gt,
     Ge,
     And,
     Or,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum UnOp {
+    Not,
+    Neg,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnaryExpr {
+    pub op: Spanned<UnOp>,
+    pub operand: Spanned<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexExpr {
+    pub base: Spanned<Expr>,
+    pub index: Spanned<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

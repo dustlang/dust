@@ -112,46 +112,83 @@ impl Parser {
         }
 
         let end = self.expect(Token::RBrace)?.span.end;
-        Ok(Spanned::new(ForgeDecl { name, items }, Span::new(start, end)))
+        Ok(Spanned::new(
+            ForgeDecl { name, items },
+            Span::new(start, end),
+        ))
     }
 
     fn parse_item(&mut self) -> Result<Spanned<Item>, ParseError> {
-    match &self.peek().node {
-        Token::Keyword(Keyword::Proc) => {
-            let p = self.parse_proc()?;
-            Ok(Spanned::new(Item::Proc(p.node), p.span))
+        match &self.peek().node {
+            Token::Keyword(Keyword::Proc) => {
+                let p = self.parse_proc()?;
+                Ok(Spanned::new(Item::Proc(p.node), p.span))
+            }
+            // If you want a better error message than “expected forge item”
+            Token::Keyword(Keyword::Shape) => {
+                Err(self.err_here("`shape` is not supported by this parser build"))
+            }
+            Token::Keyword(Keyword::Bind) => {
+                Err(self.err_here("`bind` is not supported by this parser build"))
+            }
+            _ => Err(self.err_here("expected forge item (`proc`)")),
         }
-        // If you want a better error message than “expected forge item”
-        Token::Keyword(Keyword::Shape) => Err(self.err_here("`shape` is not supported by this parser build")),
-        Token::Keyword(Keyword::Bind) => Err(self.err_here("`bind` is not supported by this parser build")),
-        _ => Err(self.err_here("expected forge item (`proc`)")),
     }
-}
 
     // ─────────────────────────────────────────────────────────────
-    // Shorthand proc (NEW)
+    // Shorthand proc (expanded for v0.2)
     // ─────────────────────────────────────────────────────────────
 
     fn parse_proc_shorthand(&mut self) -> Result<Spanned<ProcDecl>, ParseError> {
-        // Syntax:  K main { ... }
+        // Syntax:  K main { ... }  or  K main(params) -> ReturnType { ... }
         let regime = self.parse_regime()?;
         let name = self.expect_ident()?;
         let start = regime.span.start;
 
+        // Parse parameters if present
+        let params = if self.peek_is(&Token::LParen) {
+            self.bump();
+            let mut params = Vec::new();
+            while !self.peek_is(&Token::RParen) {
+                let param_name = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let param_type = self.parse_type()?;
+                params.push(Spanned::new(
+                    ParamDecl {
+                        name: param_name,
+                        ty: param_type,
+                    },
+                    Span::default(),
+                ));
+                if !self.peek_is(&Token::RParen) {
+                    self.expect(Token::Comma)?;
+                }
+            }
+            self.expect(Token::RParen)?;
+            params
+        } else {
+            Vec::new()
+        };
+
+        // Parse return type if present
+        let ret = if self.peek_is(&Token::Arrow) {
+            self.bump();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
         let body = self.parse_block()?;
         let end = body.span.end;
 
-        let path = Spanned::new(
-            ProcPath { regime, name },
-            Span::new(start, end),
-        );
+        let path = Spanned::new(ProcPath { regime, name }, Span::new(start, end));
 
         let sig = Spanned::new(
             ProcSig {
                 path,
-                params: Vec::new(),
+                params,
                 uses: Vec::new(),
-                ret: None,
+                ret,
                 qualifiers: Vec::new(),
             },
             Span::new(start, end),
@@ -220,31 +257,478 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
         match &self.peek().node {
-            Token::Keyword(Keyword::Emit) => {
-                let start = self.bump().span.start;
-                let expr = self.parse_expr()?;
-                self.expect(Token::Semi)?;
-                let end = self.prev_span().end;
-                Ok(Spanned::new(
-                    Stmt::Effect(EffectStmt {
-                        kind: Spanned::new(EffectKind::Emit, Span::new(start, start)),
-                        payload: expr,
-                    }),
-                    Span::new(start, end),
-                ))
-            }
-            _ => Err(self.err_here("unsupported statement")),
+            Token::Keyword(Keyword::Let) => self.parse_let_stmt(false),
+            Token::Keyword(Keyword::Mut) => self.parse_let_stmt(true),
+            Token::Keyword(Keyword::Emit) => self.parse_effect_stmt(),
+            Token::Keyword(Keyword::Return) => self.parse_return_stmt(),
+            Token::Keyword(Keyword::If) => self.parse_if_stmt(),
+            Token::Keyword(Keyword::For) => self.parse_for_stmt(),
+            Token::Keyword(Keyword::While) => self.parse_while_stmt(),
+            Token::Keyword(Keyword::Break) => self.parse_break_stmt(),
+            Token::Keyword(Keyword::Continue) => self.parse_continue_stmt(),
+            _ => self.parse_expr_stmt(),
         }
     }
 
-    fn parse_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
-        let t = self.peek().clone();
-        match t.node {
-            Token::String(s) => {
-                let sp = self.bump().span;
-                Ok(Spanned::new(Expr::Literal(Literal::String(s)), sp))
+    // ─────────────────────────────────────────────────────────────
+    // Variable statements (let, mut let)
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_let_stmt(&mut self, mutable: bool) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.bump().span.start;
+
+        let name = self.expect_ident()?;
+
+        let ty = if self.peek_is(&Token::Colon) {
+            self.bump();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        self.expect(Token::Eq)?;
+        let expr = self.parse_expr()?;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+
+        let stmt = if mutable {
+            Stmt::MutLet(MutLetStmt { name, ty, expr })
+        } else {
+            Stmt::Let(LetStmt { name, ty, expr })
+        };
+
+        Ok(Spanned::new(stmt, Span::new(start, end)))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Effect statement (emit)
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_effect_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.bump().span.start;
+        let expr = self.parse_expr()?;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(
+            Stmt::Effect(EffectStmt {
+                kind: Spanned::new(EffectKind::Emit, Span::new(start, start)),
+                payload: expr,
+            }),
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Return statement
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_return_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.bump().span.start;
+        let expr = self.parse_expr()?;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(
+            Stmt::Return(ReturnStmt { expr }),
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // If statement
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_if_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.expect_kw(Keyword::If)?.span.start;
+
+        let condition = self.parse_expr()?;
+        let then_block = self.parse_block()?;
+
+        let else_block = if self.peek_is(&Token::Keyword(Keyword::Else)) {
+            self.bump();
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+
+        let end = else_block
+            .as_ref()
+            .map(|b| b.span.end)
+            .unwrap_or(then_block.span.end);
+
+        Ok(Spanned::new(
+            Stmt::If(IfStmt {
+                condition,
+                then_block,
+                else_block,
+            }),
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // For statement
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_for_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.expect_kw(Keyword::For)?.span.start;
+
+        let var = self.expect_ident()?;
+        self.expect(Token::Keyword(Keyword::In))?;
+
+        let start_expr = self.parse_expr()?;
+        self.expect(Token::DotDot)?;
+        let end_expr = self.parse_expr()?;
+
+        let body = self.parse_block()?;
+        let end = body.span.end;
+
+        Ok(Spanned::new(
+            Stmt::For(ForStmt {
+                var,
+                start: start_expr,
+                end: end_expr,
+                body,
+            }),
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // While statement
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_while_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.expect_kw(Keyword::While)?.span.start;
+
+        let condition = self.parse_expr()?;
+        let body = self.parse_block()?;
+        let end = body.span.end;
+
+        Ok(Spanned::new(
+            Stmt::While(WhileStmt { condition, body }),
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Break/Continue statements
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_break_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.expect_kw(Keyword::Break)?.span.start;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(Stmt::Break(BreakStmt), Span::new(start, end)))
+    }
+
+    fn parse_continue_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let start = self.expect_kw(Keyword::Continue)?.span.start;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(
+            Stmt::Continue(ContinueStmt),
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Match expression (v0.2)
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_match_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        let start = self.expect_kw(Keyword::Match)?.span.start;
+
+        let expr = self.parse_expr()?;
+        self.expect(Token::LBrace)?;
+
+        let mut arms = Vec::new();
+        while !self.peek_is(&Token::RBrace) {
+            let pattern = self.parse_match_pattern()?;
+            self.expect(Token::FatArrow)?;
+            let body = self.parse_expr()?;
+
+            arms.push(Spanned::new(MatchArm { pattern, body }, Span::default()));
+
+            if !self.peek_is(&Token::RBrace) {
+                self.expect(Token::Comma)?;
             }
+        }
+
+        self.expect(Token::RBrace)?;
+        let end = self.prev_span().end;
+
+        let match_expr = Spanned::new(MatchExpr { expr, arms }, Span::new(start, end));
+
+        Ok(Spanned::new(
+            Expr::Match(Box::new(match_expr)),
+            Span::new(start, end),
+        ))
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<Spanned<MatchPattern>, ParseError> {
+        let t = self.peek().clone();
+        match &t.node {
+            Token::Int(n) => {
+                self.bump();
+                let sp = self.prev_span();
+                Ok(Spanned::new(MatchPattern::Literal(Literal::Int(*n)), sp))
+            }
+            Token::Bool(b) => {
+                self.bump();
+                let sp = self.prev_span();
+                Ok(Spanned::new(MatchPattern::Literal(Literal::Bool(*b)), sp))
+            }
+            Token::Ident(s) => {
+                self.bump();
+                let sp = self.prev_span();
+                let ident = Ident::new(s.clone(), sp);
+                Ok(Spanned::new(MatchPattern::Ident(ident), sp))
+            }
+            Token::Underscore => {
+                self.bump();
+                let sp = self.prev_span();
+                Ok(Spanned::new(MatchPattern::Wildcard, sp))
+            }
+            _ => Err(self.err_here("expected pattern")),
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Expression statement
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_expr_stmt(&mut self) -> Result<Spanned<Stmt>, ParseError> {
+        let expr = self.parse_expr()?;
+        let start = expr.span.start;
+        self.expect(Token::Semi)?;
+        let end = self.prev_span().end;
+        Ok(Spanned::new(
+            Stmt::Expr(ExprStmt { expr }),
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Expression parsing
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        self.parse_binary_expr()
+    }
+
+    fn parse_binary_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        self.parse_unary_expr()
+    }
+
+    fn parse_unary_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        if self.peek_is(&Token::Bang) {
+            let start = self.bump().span.start;
+            let operand = self.parse_unary_expr()?;
+            let end = operand.span.end;
+            let unary_expr = Spanned::new(
+                UnaryExpr {
+                    op: Spanned::new(UnOp::Not, Span::new(start, start)),
+                    operand,
+                },
+                Span::new(start, end),
+            );
+            return Ok(Spanned::new(
+                Expr::Unary(Box::new(unary_expr)),
+                Span::new(start, end),
+            ));
+        }
+        if self.peek_is(&Token::Minus) {
+            let start = self.bump().span.start;
+            let operand = self.parse_unary_expr()?;
+            let end = operand.span.end;
+            let unary_expr = Spanned::new(
+                UnaryExpr {
+                    op: Spanned::new(UnOp::Neg, Span::new(start, start)),
+                    operand,
+                },
+                Span::new(start, end),
+            );
+            return Ok(Spanned::new(
+                Expr::Unary(Box::new(unary_expr)),
+                Span::new(start, end),
+            ));
+        }
+        self.parse_postfix_expr()
+    }
+
+    fn parse_postfix_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        let mut expr = self.parse_primary_expr()?;
+
+        loop {
+            if self.peek_is(&Token::LParen) {
+                expr = self.parse_call_expr(expr)?;
+            } else if self.peek_is(&Token::Dot) {
+                expr = self.parse_field_expr(expr)?;
+            } else if self.peek_is(&Token::LBracket) {
+                expr = self.parse_index_expr(expr)?;
+            } else {
+                break;
+            }
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_call_expr(&mut self, callee: Spanned<Expr>) -> Result<Spanned<Expr>, ParseError> {
+        let start = callee.span.start;
+        self.bump(); // consume (
+
+        let mut args = Vec::new();
+        while !self.peek_is(&Token::RParen) {
+            args.push(self.parse_expr()?);
+            if !self.peek_is(&Token::RParen) {
+                self.expect(Token::Comma)?;
+            }
+        }
+
+        let end = self.expect(Token::RParen)?.span.end;
+
+        let call_expr = Spanned::new(CallExpr { callee, args }, Span::new(start, end));
+
+        Ok(Spanned::new(
+            Expr::Call(Box::new(call_expr)),
+            Span::new(start, end),
+        ))
+    }
+
+    fn parse_field_expr(&mut self, base: Spanned<Expr>) -> Result<Spanned<Expr>, ParseError> {
+        let start = base.span.start;
+        self.bump(); // consume .
+        let field = self.expect_ident()?;
+        let end = field.span.end;
+
+        let field_expr = Spanned::new(FieldExpr { base, field }, Span::new(start, end));
+
+        Ok(Spanned::new(
+            Expr::Field(Box::new(field_expr)),
+            Span::new(start, end),
+        ))
+    }
+
+    fn parse_index_expr(&mut self, base: Spanned<Expr>) -> Result<Spanned<Expr>, ParseError> {
+        let start = base.span.start;
+        self.bump(); // consume [
+        let index = self.parse_expr()?;
+        let end = self.expect(Token::RBracket)?.span.end;
+
+        let index_expr = Spanned::new(IndexExpr { base, index }, Span::new(start, end));
+
+        Ok(Spanned::new(
+            Expr::Index(Box::new(index_expr)),
+            Span::new(start, end),
+        ))
+    }
+
+    fn parse_primary_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        let t = self.peek().clone();
+        match &t.node {
+            Token::Int(n) => {
+                self.bump();
+                let sp = self.prev_span();
+                Ok(Spanned::new(Expr::Literal(Literal::Int(*n)), sp))
+            }
+            Token::Float(f) => {
+                self.bump();
+                let sp = self.prev_span();
+                Ok(Spanned::new(Expr::Literal(Literal::Float(*f)), sp))
+            }
+            Token::Char(c) => {
+                self.bump();
+                let sp = self.prev_span();
+                Ok(Spanned::new(Expr::Literal(Literal::Char(*c)), sp))
+            }
+            Token::String(s) => {
+                self.bump();
+                let sp = self.prev_span();
+                Ok(Spanned::new(Expr::Literal(Literal::String(s.clone())), sp))
+            }
+            Token::Bool(b) => {
+                self.bump();
+                let sp = self.prev_span();
+                Ok(Spanned::new(Expr::Literal(Literal::Bool(*b)), sp))
+            }
+            Token::Ident(_) => {
+                self.bump();
+                let sp = self.prev_span();
+                let name = Ident::new(t.node.clone().unwrap_ident(), sp);
+                Ok(Spanned::new(Expr::Ident(name), sp))
+            }
+            Token::LParen => {
+                self.bump();
+                let expr = self.parse_expr()?;
+                self.expect(Token::RParen)?;
+                let span = Span::new(t.span.start, self.prev_span().end);
+                Ok(Spanned::new(Expr::Paren(Box::new(expr)), span))
+            }
+            Token::LBracket => self.parse_array_or_slice(),
+            Token::LBrace => self.parse_struct_or_block(),
             _ => Err(self.err_here("expected expression")),
+        }
+    }
+
+    fn parse_array_or_slice(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        let start = self.bump().span.start;
+
+        let mut elements = Vec::new();
+        while !self.peek_is(&Token::RBracket) {
+            elements.push(self.parse_expr()?);
+            if !self.peek_is(&Token::RBracket) {
+                self.expect(Token::Comma)?;
+            }
+        }
+
+        let end = self.expect(Token::RBracket)?.span.end;
+
+        Ok(Spanned::new(Expr::Array(elements), Span::new(start, end)))
+    }
+
+    fn parse_struct_or_block(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        let start = self.peek().span.start;
+
+        // Could be a struct literal or a block - look ahead
+        // For now, treat as block
+        self.parse_block_expr()
+    }
+
+    fn parse_block_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
+        let block = self.parse_block()?;
+        Ok(Spanned::new(Expr::Block(block.node), block.span))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Type parsing
+    // ─────────────────────────────────────────────────────────────
+
+    fn parse_type(&mut self) -> Result<Spanned<TypeRef>, ParseError> {
+        let t = self.peek().clone();
+        match &t.node {
+            Token::Ident(s) => {
+                self.bump();
+                let span = self.prev_span();
+                Ok(Spanned::new(
+                    TypeRef::Named(Ident::new(s.clone(), span)),
+                    span,
+                ))
+            }
+            Token::LBracket => {
+                let start = self.bump().span.start;
+                let elem = self.parse_type()?;
+                self.expect(Token::RBracket)?;
+                let end = self.prev_span().end;
+                Ok(Spanned::new(
+                    TypeRef::Array {
+                        elem: Box::new(elem),
+                        len: 0,
+                    },
+                    Span::new(start, end),
+                ))
+            }
+            _ => Err(self.err_here("expected type")),
         }
     }
 

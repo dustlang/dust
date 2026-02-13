@@ -1,0 +1,43 @@
+// examples/K/k_control_flow.ds
+//
+// Demonstrates K Regime v0.2 control flow structures
+//
+// Regime: K (Classical / Deterministic)
+
+K main {
+    // If-else statement
+    let x: K[Int] = 42;
+    
+    if x > 0 {
+        emit "x is positive";
+    } else if x < 0 {
+        emit "x is negative";
+    } else {
+        emit "x is zero";
+    }
+    
+    // For loop (range-based)
+    emit "For loop:";
+    for i in 0..5 {
+        emit "  iteration {i}";
+    }
+    
+    // While loop
+    mut let count: K[Int] = 0;
+    emit "While loop:";
+    while count < 3 {
+        emit "  count = {count}";
+        count = count + 1;
+    }
+    
+    // Break and continue
+    emit "Break example:";
+    for i in 0..10 {
+        if i == 3 {
+            break;
+        }
+        emit "  i = {i}";
+    }
+    
+    emit "Control flow demo complete";
+}
