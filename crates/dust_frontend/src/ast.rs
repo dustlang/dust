@@ -97,6 +97,14 @@ pub enum Item {
     Shape(ShapeDecl),
     Proc(ProcDecl),
     Bind(BindDecl),
+    Const(ConstDecl),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstDecl {
+    pub name: Ident,
+    pub ty: Option<Spanned<TypeRef>>,
+    pub value: Spanned<Literal>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -236,6 +244,10 @@ pub enum TypeRef {
     Array {
         elem: Box<Spanned<TypeRef>>,
         len: usize,
+    },
+    Regimed {
+        regime: Regime,
+        inner: Box<Spanned<TypeRef>>,
     },
 }
 
@@ -406,6 +418,11 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]

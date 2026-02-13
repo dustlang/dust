@@ -124,17 +124,74 @@ impl Parser {
                 let p = self.parse_proc()?;
                 Ok(Spanned::new(Item::Proc(p.node), p.span))
             }
-            // If you want a better error message than “expected forge item”
+            Token::Keyword(Keyword::Const) => {
+                let c = self.parse_const()?;
+                Ok(Spanned::new(Item::Const(c.node), c.span))
+            }
             Token::Keyword(Keyword::Shape) => {
-                Err(self.err_here("`shape` is not supported by this parser build"))
+                let s = self.parse_shape()?;
+                Ok(Spanned::new(Item::Shape(s.node), s.span))
             }
             Token::Keyword(Keyword::Bind) => {
                 Err(self.err_here("`bind` is not supported by this parser build"))
             }
-            _ => Err(self.err_here("expected forge item (`proc`)")),
+            _ => Err(self.err_here("expected forge item (`proc`, `const`, or `shape`)")),
         }
     }
 
+    fn parse_const(&mut self) -> Result<Spanned<ConstDecl>, ParseError> {
+        let start = self.expect_kw(Keyword::Const)?.span.start;
+        let name = self.expect_ident()?;
+
+        let ty = if self.peek_is(&Token::Colon) {
+            self.bump();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        self.expect(Token::Eq)?;
+        let value = self.parse_literal()?;
+        self.expect(Token::Semi)?;
+        let end = value.span.end;
+
+        Ok(Spanned::new(
+            ConstDecl { name, ty, value },
+            Span::new(start, end),
+        ))
+    }
+
+    fn parse_shape(&mut self) -> Result<Spanned<ShapeDecl>, ParseError> {
+        let start = self.expect_kw(Keyword::Shape)?.span.start;
+        let name = self.expect_ident()?;
+        self.expect(Token::LBrace)?;
+
+        let mut fields = Vec::new();
+        while !self.peek_is(&Token::RBrace) {
+            let field_name = self.expect_ident()?;
+            self.expect(Token::Colon)?;
+            let field_type = self.parse_type()?;
+            self.expect(Token::Semi)?;
+            let field_span = field_type.span;
+            fields.push(Spanned::new(
+                FieldDecl {
+                    name: field_name,
+                    ty: field_type,
+                },
+                field_span,
+            ));
+        }
+
+        let end = self.expect(Token::RBrace)?.span.end;
+
+        Ok(Spanned::new(
+            ShapeDecl { name, fields },
+            Span::new(start, end),
+        ))
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Shorthand proc (expanded for v0.2)
     // ─────────────────────────────────────────────────────────────
     // Shorthand proc (expanded for v0.2)
     // ─────────────────────────────────────────────────────────────
@@ -198,23 +255,55 @@ impl Parser {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // Normal proc parsing (unchanged)
+    // Normal proc parsing - enhanced for v0.2
     // ─────────────────────────────────────────────────────────────
 
     fn parse_proc(&mut self) -> Result<Spanned<ProcDecl>, ParseError> {
         let start = self.expect_kw(Keyword::Proc)?.span.start;
         let path = self.parse_proc_path()?;
-        self.expect(Token::LParen)?;
-        self.expect(Token::RParen)?;
+
+        // Parse parameters if present
+        let params = if self.peek_is(&Token::LParen) {
+            self.bump();
+            let mut params = Vec::new();
+            while !self.peek_is(&Token::RParen) {
+                let param_name = self.expect_ident()?;
+                self.expect(Token::Colon)?;
+                let param_type = self.parse_type()?;
+                params.push(Spanned::new(
+                    ParamDecl {
+                        name: param_name,
+                        ty: param_type,
+                    },
+                    Span::default(),
+                ));
+                if !self.peek_is(&Token::RParen) {
+                    self.expect(Token::Comma)?;
+                }
+            }
+            self.expect(Token::RParen)?;
+            params
+        } else {
+            Vec::new()
+        };
+
+        // Parse return type if present
+        let ret = if self.peek_is(&Token::Arrow) {
+            self.bump();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
         let body = self.parse_block()?;
         let end = body.span.end;
 
         let sig = Spanned::new(
             ProcSig {
                 path,
-                params: Vec::new(),
+                params,
                 uses: Vec::new(),
-                ret: None,
+                ret,
                 qualifiers: Vec::new(),
             },
             Span::new(start, end),
@@ -517,7 +606,50 @@ impl Parser {
     }
 
     fn parse_binary_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
-        self.parse_unary_expr()
+        let mut lhs = self.parse_unary_expr()?;
+
+        // Simple binary expression parsing - handle one level of operators
+        while let Some(op) = self.peek_bin_op() {
+            let start = lhs.span.start;
+            self.bump();
+            let rhs = self.parse_unary_expr()?;
+            let end = rhs.span.end;
+
+            let bin_expr = Spanned::new(
+                BinaryExpr {
+                    op: Spanned::new(op, Span::new(start, start + 1)),
+                    lhs: lhs,
+                    rhs: rhs,
+                },
+                Span::new(start, end),
+            );
+            lhs = Spanned::new(Expr::Binary(Box::new(bin_expr)), Span::new(start, end));
+        }
+
+        Ok(lhs)
+    }
+
+    fn peek_bin_op(&mut self) -> Option<BinOp> {
+        match &self.peek().node {
+            Token::Plus => Some(BinOp::Add),
+            Token::Minus => Some(BinOp::Sub),
+            Token::Star => Some(BinOp::Mul),
+            Token::Slash => Some(BinOp::Div),
+            Token::EqEq => Some(BinOp::Eq),
+            Token::Bang => Some(BinOp::Ne),
+            Token::Lt => Some(BinOp::Lt),
+            Token::Lte => Some(BinOp::Le),
+            Token::Gt => Some(BinOp::Gt),
+            Token::Gte => Some(BinOp::Ge),
+            Token::AndAnd => Some(BinOp::And),
+            Token::OrOr => Some(BinOp::Or),
+            Token::Amp => Some(BinOp::BitAnd),
+            Token::Pipe => Some(BinOp::BitOr),
+            Token::Caret => Some(BinOp::BitXor),
+            Token::LtLt => Some(BinOp::Shl),
+            Token::GtGt => Some(BinOp::Shr),
+            _ => None,
+        }
     }
 
     fn parse_unary_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
@@ -624,6 +756,33 @@ impl Parser {
         ))
     }
 
+    fn parse_literal(&mut self) -> Result<Spanned<Literal>, ParseError> {
+        let t = self.peek().clone();
+        match &t.node {
+            Token::Int(n) => {
+                self.bump();
+                Ok(Spanned::new(Literal::Int(*n), self.prev_span()))
+            }
+            Token::Float(f) => {
+                self.bump();
+                Ok(Spanned::new(Literal::Float(*f), self.prev_span()))
+            }
+            Token::Bool(b) => {
+                self.bump();
+                Ok(Spanned::new(Literal::Bool(*b), self.prev_span()))
+            }
+            Token::String(s) => {
+                self.bump();
+                Ok(Spanned::new(Literal::String(s.clone()), self.prev_span()))
+            }
+            Token::Char(c) => {
+                self.bump();
+                Ok(Spanned::new(Literal::Char(*c), self.prev_span()))
+            }
+            _ => Err(self.err_here("expected literal value")),
+        }
+    }
+
     fn parse_primary_expr(&mut self) -> Result<Spanned<Expr>, ParseError> {
         let t = self.peek().clone();
         match &t.node {
@@ -707,6 +866,67 @@ impl Parser {
     fn parse_type(&mut self) -> Result<Spanned<TypeRef>, ParseError> {
         let t = self.peek().clone();
         match &t.node {
+            Token::Keyword(Keyword::K) => {
+                self.bump();
+                if self.peek_is(&Token::LBracket) {
+                    self.bump();
+                    let inner = self.parse_type()?;
+                    self.expect(Token::RBracket)?;
+                    let span = Span::new(t.span.start, self.prev_span().end);
+                    return Ok(Spanned::new(
+                        TypeRef::Regimed {
+                            regime: Regime::K,
+                            inner: Box::new(inner),
+                        },
+                        span,
+                    ));
+                }
+                // Just K as a type name
+                Ok(Spanned::new(
+                    TypeRef::Named(Ident::new("K", t.span)),
+                    t.span,
+                ))
+            }
+            Token::Keyword(Keyword::Q) => {
+                self.bump();
+                if self.peek_is(&Token::LBracket) {
+                    self.bump();
+                    let inner = self.parse_type()?;
+                    self.expect(Token::RBracket)?;
+                    let span = Span::new(t.span.start, self.prev_span().end);
+                    return Ok(Spanned::new(
+                        TypeRef::Regimed {
+                            regime: Regime::Q,
+                            inner: Box::new(inner),
+                        },
+                        span,
+                    ));
+                }
+                Ok(Spanned::new(
+                    TypeRef::Named(Ident::new("Q", t.span)),
+                    t.span,
+                ))
+            }
+            Token::Keyword(Keyword::Phi) => {
+                self.bump();
+                if self.peek_is(&Token::LBracket) {
+                    self.bump();
+                    let inner = self.parse_type()?;
+                    self.expect(Token::RBracket)?;
+                    let span = Span::new(t.span.start, self.prev_span().end);
+                    return Ok(Spanned::new(
+                        TypeRef::Regimed {
+                            regime: Regime::Phi,
+                            inner: Box::new(inner),
+                        },
+                        span,
+                    ));
+                }
+                Ok(Spanned::new(
+                    TypeRef::Named(Ident::new("Phi", t.span)),
+                    t.span,
+                ))
+            }
             Token::Ident(s) => {
                 self.bump();
                 let span = self.prev_span();

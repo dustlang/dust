@@ -118,6 +118,9 @@ pub fn lower_to_dir(file: &FileAst) -> DirProgram {
                             .collect(),
                     });
                 }
+                Item::Const(_) => {
+                    // Constants are inlined at compile time
+                }
             }
         }
 
@@ -291,6 +294,14 @@ fn type_to_string(t: &TypeRef) -> String {
         TypeRef::Primitive(p) => format!("{:?}", p),
         TypeRef::Named(id) => id.text.clone(),
         TypeRef::Array { elem, len, .. } => format!("[{}; {}]", type_to_string(&elem.node), len),
+        TypeRef::Regimed { regime, inner } => {
+            let regime_str = match regime {
+                Regime::K => "K",
+                Regime::Q => "Q",
+                Regime::Phi => "Phi",
+            };
+            format!("{}[{}]", regime_str, type_to_string(&inner.node))
+        }
     }
 }
 

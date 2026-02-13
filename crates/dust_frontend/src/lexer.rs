@@ -32,6 +32,7 @@ pub struct LexError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Keyword {
     Forge,
+    Module,
     Shape,
     Proc,
     Bind,
@@ -39,6 +40,7 @@ pub enum Keyword {
     Uses,
     Let,
     Mut,
+    Const,
     Constrain,
     Prove,
     From,
@@ -102,6 +104,11 @@ pub enum Token {
     Bang,       // !
     Underscore, // _
     FatArrow,   // =>
+    Amp,        // & (bitwise AND)
+    Pipe,       // | (bitwise OR)
+    Caret,      // ^ (bitwise XOR)
+    LtLt,       // << (left shift)
+    GtGt,       // >> (right shift)
 
     Eof,
 }
@@ -218,7 +225,7 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     return Ok(self.span(Token::AndAnd, start, self.i as u32));
                 }
-                return Err(self.err(LexErrorKind::UnexpectedChar('&'), start, self.i as u32));
+                return Ok(self.span(Token::Amp, start, self.i as u32));
             }
             b'|' => {
                 self.bump();
@@ -226,7 +233,35 @@ impl<'a> Lexer<'a> {
                     self.bump();
                     return Ok(self.span(Token::OrOr, start, self.i as u32));
                 }
-                return Err(self.err(LexErrorKind::UnexpectedChar('|'), start, self.i as u32));
+                return Ok(self.span(Token::Pipe, start, self.i as u32));
+            }
+            b'^' => {
+                self.bump();
+                return Ok(self.span(Token::Caret, start, self.i as u32));
+            }
+            b'<' => {
+                self.bump();
+                if self.peek_u8() == Some(b'<') {
+                    self.bump();
+                    return Ok(self.span(Token::LtLt, start, self.i as u32));
+                }
+                if self.peek_u8() == Some(b'=') {
+                    self.bump();
+                    return Ok(self.span(Token::Lte, start, self.i as u32));
+                }
+                return Ok(self.span(Token::Lt, start, self.i as u32));
+            }
+            b'>' => {
+                self.bump();
+                if self.peek_u8() == Some(b'>') {
+                    self.bump();
+                    return Ok(self.span(Token::GtGt, start, self.i as u32));
+                }
+                if self.peek_u8() == Some(b'=') {
+                    self.bump();
+                    return Ok(self.span(Token::Gte, start, self.i as u32));
+                }
+                return Ok(self.span(Token::Gt, start, self.i as u32));
             }
             b'.' => {
                 // Check for range operator ..
@@ -540,6 +575,7 @@ impl<'a> Lexer<'a> {
 
         let tok = match s.as_str() {
             "forge" => Token::Keyword(Keyword::Forge),
+            "module" => Token::Keyword(Keyword::Module),
             "shape" => Token::Keyword(Keyword::Shape),
             "proc" => Token::Keyword(Keyword::Proc),
             "bind" => Token::Keyword(Keyword::Bind),
@@ -547,6 +583,7 @@ impl<'a> Lexer<'a> {
             "uses" => Token::Keyword(Keyword::Uses),
             "let" => Token::Keyword(Keyword::Let),
             "mut" => Token::Keyword(Keyword::Mut),
+            "const" => Token::Keyword(Keyword::Const),
             "constrain" => Token::Keyword(Keyword::Constrain),
             "prove" => Token::Keyword(Keyword::Prove),
             "from" => Token::Keyword(Keyword::From),
