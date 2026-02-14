@@ -44,6 +44,20 @@ enum Command {
         out: Option<PathBuf>,
     },
 
+    /// Build an object file for linking (e.g., with dustlink)
+    Obj {
+        /// Path to a single .ds file
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Output object path (default: target/dust/<stem>.o)
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        /// Target triple (default: host)
+        /// Examples: x86_64-unknown-linux-gnu, x86_64-pc-none-elf
+        #[arg(long)]
+        target: Option<String>,
+    },
+
     /// Build then run (v0.1 executable subset)
     Run {
         /// Path to a single .ds file (or a directory containing exactly one .ds)
@@ -62,6 +76,7 @@ fn main() -> Result<()> {
         Command::Check { path } => cmd_check(&path),
         Command::Dir { path, out, print } => cmd_dir(&path, &out, print),
         Command::Build { path, out } => cmd_build(&path, out.as_deref()),
+        Command::Obj { path, out, target } => cmd_obj(&path, out.as_deref(), target.as_deref()),
         Command::Run { path, args } => cmd_run(&path, &args),
     }
 }
@@ -164,6 +179,44 @@ fn cmd_build(path: &Path, out: Option<&Path>) -> Result<()> {
 
     let exe = dust_codegen::build_executable(&dir, &out_path)?;
     println!("{}", exe.display());
+    Ok(())
+}
+
+fn cmd_obj(path: &Path, out: Option<&Path>, target: Option<&str>) -> Result<()> {
+    let file = single_ds_file(path)?;
+    let src = fs::read_to_string(&file)?;
+    let ast = dust_semantics::parse_and_check(&src).map_err(|e| {
+        anyhow!(
+            "{}: {} at {}..{}",
+            file.display(),
+            e.message,
+            e.span.start,
+            e.span.end
+        )
+    })?;
+
+    let dir = dust_semantics::lower_to_dir(&ast);
+
+    // Default output path: target/dust/<stem>.o
+    let out_path = match out {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let mut p = default_out_path(&file)?;
+            p.set_extension("o");
+            p
+        }
+    };
+
+    // Ensure parent exists
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let obj_path = match target {
+        Some(t) => dust_codegen::build_object_file_for_target(&dir, &out_path, t)?,
+        None => dust_codegen::build_object_file(&dir, &out_path)?,
+    };
+    println!("{}", obj_path.display());
     Ok(())
 }
 

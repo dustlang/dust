@@ -5,6 +5,7 @@
 // What this enables:
 // - `dust build <file.ds>` produces a native executable (ELF/Mach-O/PE)
 // - `dust run <file.ds>` builds then runs it
+// - `dust obj <file.ds>` produces an object file for linking
 //
 // v0.1 executable subset implemented here:
 // - A K-regime process named `main`
@@ -12,18 +13,19 @@
 //
 // Backend:
 // - Cranelift -> object file -> system linker (cc/clang/link.exe)
+// - For `dust obj`: Cranelift -> object file (no linking)
 //
 // NOTE: Q and Φ are not codegen-enabled here (they should be rejected earlier, but we also fail here).
 
 use anyhow::{anyhow, bail, Context, Result};
+use cranelift_codegen::ir::InstBuilder;
 use cranelift_codegen::ir::{AbiParam, FuncRef, Signature, UserFuncName};
 use cranelift_codegen::isa;
 use cranelift_codegen::settings;
-use cranelift_codegen::ir::InstBuilder;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use dust_dir::{DirProgram, DirProc, DirStmt};
+use dust_dir::{DirProc, DirProgram, DirStmt};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,6 +59,60 @@ pub fn build_executable(dir: &DirProgram, out_path: &Path) -> Result<PathBuf> {
     let _ = fs::remove_file(&obj_path);
 
     Ok(exe_path)
+}
+
+/// Build an object file from a DIR program.
+/// Returns the object file path.
+/// The object file can be linked with dustlink or system linker.
+pub fn build_object_file(dir: &DirProgram, out_path: &Path) -> Result<PathBuf> {
+    // Locate K::main in DIR
+    let main = find_k_main(dir).context("DIR does not contain a codegen-capable K::main")?;
+
+    // Validate supported subset and extract emit payloads
+    let emit_strings = extract_emit_strings(&main.body)?;
+
+    // Build object with Cranelift
+    let obj_bytes = build_object_with_main(&emit_strings)?;
+
+    // Write object file
+    let obj_path = normalize_obj_path(out_path);
+    fs::write(&obj_path, &obj_bytes)
+        .with_context(|| format!("write object file {:?}", obj_path))?;
+
+    Ok(obj_path)
+}
+
+/// Build an object file for a specific target triple.
+/// Useful for cross-compilation (e.g., x86_64-pc-none for bare metal/OS kernels.
+pub fn build_object_file_for_target(
+    dir: &DirProgram,
+    out_path: &Path,
+    target_triple: &str,
+) -> Result<PathBuf> {
+    // Locate K::main in DIR
+    let main = find_k_main(dir).context("DIR does not contain a codegen-capable K::main")?;
+
+    // Validate supported subset and extract emit payloads
+    let emit_strings = extract_emit_strings(&main.body)?;
+
+    // Build object with Cranelift for specific target
+    let obj_bytes = build_object_with_target(&emit_strings, target_triple)?;
+
+    // Write object file
+    let obj_path = normalize_obj_path(out_path);
+    fs::write(&obj_path, &obj_bytes)
+        .with_context(|| format!("write object file {:?}", obj_path))?;
+
+    Ok(obj_path)
+}
+
+fn normalize_obj_path(out_path: &Path) -> PathBuf {
+    let mut p = out_path.to_path_buf();
+    // Ensure .o extension
+    if p.extension().is_none() {
+        p.set_extension("o");
+    }
+    p
 }
 
 fn normalize_exe_path(out_path: &Path) -> PathBuf {
@@ -141,9 +197,24 @@ fn decode_string_literal(payload: &str) -> Result<String> {
 }
 
 fn build_object_with_main(emit_strings: &[String]) -> Result<Vec<u8>> {
-    // Host target
     let triple = Triple::host();
+    build_object_for_triple(emit_strings, &triple)
+}
 
+/// Build object file for a specific target triple.
+/// Common targets:
+/// - "x86_64-unknown-linux-gnu" - Linux
+/// - "x86_64-pc-windows-gnu" - Windows
+/// - "x86_64-apple-darwin" - macOS
+/// - "x86_64-unknown-none" - Bare metal (no stdlib)
+fn build_object_with_target(emit_strings: &[String], target: &str) -> Result<Vec<u8>> {
+    let triple: Triple = target
+        .parse()
+        .map_err(|e| anyhow!("invalid target triple '{}': {}", target, e))?;
+    build_object_for_triple(emit_strings, &triple)
+}
+
+fn build_object_for_triple(emit_strings: &[String], triple: &Triple) -> Result<Vec<u8>> {
     // Cranelift 0.110+: finish() returns Result, so we must `?`.
     let flags = settings::Flags::new(settings::builder());
     let isa = isa::lookup(triple.clone())
