@@ -56,6 +56,10 @@ enum Command {
         /// Examples: x86_64-unknown-linux-gnu, x86_64-pc-none-elf
         #[arg(long)]
         target: Option<String>,
+        /// Build for bare-metal kernel (no libc)
+        /// Generates flat binary instead of ELF object
+        #[arg(long)]
+        bare_metal: bool,
     },
 
     /// Build then run (v0.1 executable subset)
@@ -76,7 +80,12 @@ fn main() -> Result<()> {
         Command::Check { path } => cmd_check(&path),
         Command::Dir { path, out, print } => cmd_dir(&path, &out, print),
         Command::Build { path, out } => cmd_build(&path, out.as_deref()),
-        Command::Obj { path, out, target } => cmd_obj(&path, out.as_deref(), target.as_deref()),
+        Command::Obj {
+            path,
+            out,
+            target,
+            bare_metal,
+        } => cmd_obj(&path, out.as_deref(), target.as_deref(), bare_metal),
         Command::Run { path, args } => cmd_run(&path, &args),
     }
 }
@@ -182,7 +191,7 @@ fn cmd_build(path: &Path, out: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_obj(path: &Path, out: Option<&Path>, target: Option<&str>) -> Result<()> {
+fn cmd_obj(path: &Path, out: Option<&Path>, target: Option<&str>, bare_metal: bool) -> Result<()> {
     let file = single_ds_file(path)?;
     let src = fs::read_to_string(&file)?;
     let ast = dust_semantics::parse_and_check(&src).map_err(|e| {
@@ -197,12 +206,16 @@ fn cmd_obj(path: &Path, out: Option<&Path>, target: Option<&str>) -> Result<()> 
 
     let dir = dust_semantics::lower_to_dir(&ast);
 
-    // Default output path: target/dust/<stem>.o
+    // Default output path
     let out_path = match out {
         Some(p) => p.to_path_buf(),
         None => {
             let mut p = default_out_path(&file)?;
-            p.set_extension("o");
+            if bare_metal {
+                p.set_extension("bin");
+            } else {
+                p.set_extension("o");
+            }
             p
         }
     };
@@ -212,11 +225,17 @@ fn cmd_obj(path: &Path, out: Option<&Path>, target: Option<&str>) -> Result<()> 
         fs::create_dir_all(parent)?;
     }
 
-    let obj_path = match target {
-        Some(t) => dust_codegen::build_object_file_for_target(&dir, &out_path, t)?,
-        None => dust_codegen::build_object_file(&dir, &out_path)?,
+    let result_path = if bare_metal {
+        // Build bare-metal kernel (flat binary)
+        dust_codegen::build_bare_metal_kernel(&dir, &out_path)?
+    } else if let Some(t) = target {
+        // Custom target
+        dust_codegen::build_object_file_for_target(&dir, &out_path, t)?
+    } else {
+        // Default: host object file
+        dust_codegen::build_object_file(&dir, &out_path)?
     };
-    println!("{}", obj_path.display());
+    println!("{}", result_path.display());
     Ok(())
 }
 

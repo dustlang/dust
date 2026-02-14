@@ -1,74 +1,219 @@
-# README.md
+# Dust - DPL Compiler and Toolchain
 
-# dust
-
-`dust` is the compiler and toolchain entrypoint for the **Dust Programming Language (DPL)**.
+`dust` is the compiler and toolchain for the **Dust Programming Language (DPL)**.
 
 This repository contains:
 - the DPL specification (`spec/`)
 - reference examples (`examples/`)
 - the `dust` compiler implementation (Rust)
+- `dust_runtime` - OS services for bare-metal kernels
 
 ---
 
 ## Status
 
-- **DPL specification:** v0.1 (**frozen**)
-- **Compiler:** v0.1 (**executable milestone reached for K-regime subset**)
+- **DPL Specification:** v0.2 (**active development**)
+- **Compiler:** v0.2 (**bare-metal and extended feature support**)
 
-### What works today (v0.1 executable subset)
+### What Works Today (v0.2)
 
-The compiler can produce **native executables** (ELF / Mach-O / PE) for a constrained, spec-aligned subset:
+The compiler supports multiple output modes:
 
-- **Entry point:** `K main { ... }`
-- **Supported statements (in `main`):** ordered `emit "<string>"` effects
-- **Output:** native executable that runs on the host OS/architecture
+#### 1. Native Executables (Host)
+```bash
+dust build hello.ds
+./target/dust/hello
+```
 
-This subset exists to prove end-to-end correctness:
+#### 2. Object Files (for linking)
+```bash
+dust obj hello.ds -o hello.o
+```
 
-`.ds` → parse/check → DIR → object → link → executable → run
+#### 3. Cross-Compilation
+```bash
+dust obj hello.ds --target x86_64-unknown-linux-gnu
+```
 
-### What is planned next
+#### 4. Bare-Metal Kernels (no libc)
+```bash
+dust obj hello.ds --bare-metal -o kernel.bin
+```
 
-- **Q-regime (linear):** backend + conformance tests
-- **Φ-regime (admissibility):** backend + witness/constraint tooling
-- Expanded K-regime statements (still deterministic and auditable)
+---
+
+## DPL v0.2 Specification
+
+### Supported Features
+
+#### K-Regime (Classical Computing)
+- **Entry Point:** `K main { ... }`
+- **Variable Declarations:** `let x = 5;`
+- **Control Flow:**
+  - `if condition { ... } else { ... }`
+  - `while condition { ... }`
+  - `for i in 0..10 { ... }`
+- **Effects:** `emit "string"` for output
+- **Arithmetic:** `+`, `-`, `*`, `/`, `%`
+- **Comparisons:** `==`, `!=`, `<`, `<=`, `>`, `>=`
+
+#### Q-Regime (Quantum Simulation)
+- Returns `ERR_DOMAIN_NOT_AVAILABLE` (100) - stub implementation
+
+#### Φ-Regime (Future Computing)
+- Returns `ERR_DOMAIN_NOT_AVAILABLE` (100) - stub implementation
+
+### Data Types
+- `UInt8`, `UInt16`, `UInt32`, `UInt64`
+- `Int8`, `Int16`, `Int32`, `Int64`
+- `Float32`, `Float64`
+- `Bool`
+- `Char`
+
+### Code Generation
+- Cranelift-based JIT/AOT compilation
+- ELF (Linux), PE (Windows), Mach-O (macOS) executables
+- Flat binary for bare-metal
+- Object files (.o) for linking with dustlink
+
+---
+
+## Supported Targets
+
+| Target | Description |
+|--------|-------------|
+| (host) | Native (default) |
+| x86_64-unknown-linux-gnu | Linux |
+| x86_64-pc-windows-gnu | Windows |
+| x86_64-apple-darwin | macOS |
+| x86_64-unknown-none | Bare-metal (x86-64) |
 
 ---
 
 ## Quickstart
 
 ### Build and run an example
-
 ```bash
 cargo run -p dust -- build examples/K/k_hello_world.ds
 ./target/dust/k_hello_world
 ```
 
 Expected output:
-
 ```text
 Hello, Dust
 ```
 
-### More executable smoke tests
-
+### Build a bare-metal kernel
 ```bash
-cargo run -p dust -- build examples/K/k_multiple_emits.ds
-./target/dust/k_multiple_emits
+cargo run -p dust -- obj kernel.ds --bare-metal -o kernel.bin
+```
+
+### Build an object file
+```bash
+cargo run -p dust -- obj mymodule.ds -o mymodule.o
+```
+
+---
+
+## Dust Runtime (dust_runtime/)
+
+OS services for bare-metal DPL kernels written entirely in DPL:
+
+- **Console I/O** - VGA text mode output
+- **Memory Management** - Physical page allocation, heap management
+- **Process Management** - Task scheduling and context switching
+- **Interrupt Handling** - IDT and IRQ management
+- **I/O Ports** - Direct hardware I/O for x86
+
+```dust
+K main {
+    Runtime::K::init();
+    emit "Kernel started";
+}
+```
+
+### Runtime API
+
+```dust
+// Console
+Console::K::init()
+Console::K::putchar(ch: UInt8)
+Console::K::puts(s: UInt64)
+Console::K::clear()
+Console::K::set_cursor(row: UInt32, col: UInt32)
+
+// Memory
+Memory::K::init()
+Memory::K::alloc(size: UInt32) -> UInt64
+Memory::K::free(ptr: UInt64) -> UInt32
+Memory::K::copy(dest: UInt64, src: UInt64, size: UInt32) -> UInt32
+
+// Process
+Process::K::init()
+Process::K::create_task(entry: UInt64, stack: UInt64) -> UInt32
+Process::K::schedule()
+Process::K::yield()
+
+// Interrupts
+Interrupts::K::init()
+Interrupts::K::enable()
+Interrupts::K::disable()
+Interrupts::K::register_handler(vector: UInt8, handler: UInt64)
+
+// I/O Ports
+IOPort::K::inb(port: UInt16) -> UInt8
+IOPort::K::outb(port: UInt16, value: UInt8)
+IOPort::K::inw(port: UInt16) -> UInt16
+IOPort::K::outw(port: UInt16, value: UInt16)
+```
+
+---
+
+## XDV OS Integration
+
+Dust compiles to bare-metal binaries that can be used with xdv-os:
+
+```
+xdv-os/
+├── boot_sector.asm    # 512-byte boot sector
+├── kernel.asm         # Assembly kernel entry
+├── kernel.ds          # DPL kernel
+└── kernel.bin         # Compiled kernel
+```
+
+Build the bootable image:
+```bash
+cd xdv-os/src
+./build.sh  # Linux/Mac
+build.bat   # Windows
+```
+
+---
+
+## Architecture
+
+```
+.ds source → dust parser → dust semantics → DIR IR
+                                      ↓
+                         dust_codegen (Cranelift)
+                                      ↓
+              ┌─────────────┬──────────────┴──────────────┐
+              ↓             ↓                           ↓
+        Executable    Object File (.o)           Bare-Metal (.bin)
+        (ELF/PE/Mach)  (for linking)            (flat binary)
 ```
 
 ---
 
 ## CI Verification
 
-GitHub Actions is used as the primary verification loop when local CI is unavailable.
-
-The CI workflow:
-- builds the workspace
-- runs unit tests
-- compiles `.ds` examples into native executables
-- executes the produced binaries and asserts output
+GitHub Actions verifies:
+- Workspace build
+- Unit tests
+- Example compilation
+- Executable execution
+- Object file generation
+- Bare-metal kernel compilation
 
 ---
 
