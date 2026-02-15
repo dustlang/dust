@@ -605,38 +605,73 @@ fn build_object_for_triple_with_config(
     Ok(obj.write().context("emit object")?)
 }
 
-/// Kernel load address when loaded by xdv-os boot sector (32-bit PM at 64KB)
-const KERNEL_LOAD_32: u32 = 0x10000;
 /// Kernel sector window reserved by xdv-os boot stage (128 * 512 bytes).
 const KERNEL_MAX_BYTES: usize = 128 * 512;
-/// Marker for `mov esi, imm32` patch in `kernel_shell_stub.asm`.
-const EMIT_TABLE_PATCH: [u8; 5] = [0xBE, 0xAA, 0xAA, 0xAA, 0xAA];
+/// VGA text mode base physical address.
+const VGA_TEXT_BASE: u32 = 0xB8000;
+/// VGA text mode geometry.
+const VGA_COLS: u32 = 80;
+const VGA_ROWS: u32 = 25;
+const VGA_ROW_BYTES: u32 = VGA_COLS * 2;
+const VGA_ATTR_DEFAULT: u8 = 0x0F;
 
 /// Build kernel binary for bare-metal:
-/// - prints all `emit` strings collected from the K::main call graph
-/// - enters an interactive keyboard-driven shell loop in VGA text mode
-/// Layout:
-/// [interactive shell stub][emit table: count + pointers + strings]
+/// - emits straight-line 32-bit machine code
+/// - writes collected `emit` strings to VGA text mode memory
+/// - halts in a tight loop
 fn build_kernel_binary(
     emit_strings: &[String],
     _triple: &Triple,
     _config: &BuildConfig,
 ) -> Result<Vec<u8>> {
-    // Preassembled 32-bit interactive VGA + keyboard shell.
-    let mut kernel = include_bytes!("kernel_shell_stub.bin").to_vec();
+    // 32-bit protected-mode entry as loaded by xdv-os boot stage.
+    // cli
+    let mut kernel = vec![0xFA];
 
-    let patch_pos = kernel
-        .windows(EMIT_TABLE_PATCH.len())
-        .position(|w| w == EMIT_TABLE_PATCH)
-        .ok_or_else(|| anyhow!("kernel shell stub patch marker not found"))?;
+    let mut row: u32 = 0;
+    let mut col: u32 = 0;
 
-    let table_addr = KERNEL_LOAD_32
-        .checked_add(kernel.len() as u32)
-        .ok_or_else(|| anyhow!("kernel shell stub exceeds addressable load window"))?;
-    kernel[patch_pos + 1..patch_pos + 5].copy_from_slice(&table_addr.to_le_bytes());
+    for s in emit_strings {
+        for &b in s.as_bytes() {
+            if b == b'\r' {
+                continue;
+            }
+            if b == b'\n' {
+                row = row.saturating_add(1);
+                col = 0;
+                continue;
+            }
 
-    let emit_table = build_emit_table_blob(emit_strings, table_addr)?;
-    kernel.extend_from_slice(&emit_table);
+            if row >= VGA_ROWS {
+                break;
+            }
+            if col >= VGA_COLS {
+                row = row.saturating_add(1);
+                col = 0;
+                if row >= VGA_ROWS {
+                    break;
+                }
+            }
+
+            let cell_addr = VGA_TEXT_BASE
+                .checked_add(row.saturating_mul(VGA_ROW_BYTES))
+                .and_then(|v| v.checked_add(col.saturating_mul(2)))
+                .ok_or_else(|| anyhow!("vga address overflow"))?;
+            emit_mov_byte_abs(&mut kernel, cell_addr, b);
+            emit_mov_byte_abs(&mut kernel, cell_addr + 1, VGA_ATTR_DEFAULT);
+            col = col.saturating_add(1);
+        }
+
+        if row + 1 < VGA_ROWS {
+            row = row.saturating_add(1);
+            col = 0;
+        } else {
+            break;
+        }
+    }
+
+    // hlt; jmp $
+    kernel.extend_from_slice(&[0xF4, 0xEB, 0xFE]);
 
     if kernel.len() > KERNEL_MAX_BYTES {
         bail!(
@@ -649,45 +684,13 @@ fn build_kernel_binary(
     Ok(kernel)
 }
 
-fn build_emit_table_blob(emit_strings: &[String], table_addr: u32) -> Result<Vec<u8>> {
-    let count: u32 = emit_strings
-        .len()
-        .try_into()
-        .context("too many emit strings for bare-metal table")?;
-    let pointer_table_bytes = 4u32
-        .checked_add(
-            count
-                .checked_mul(4)
-                .ok_or_else(|| anyhow!("emit pointer table overflow"))?,
-        )
-        .ok_or_else(|| anyhow!("emit pointer table overflow"))?;
-
-    let strings_base = table_addr
-        .checked_add(pointer_table_bytes)
-        .ok_or_else(|| anyhow!("emit table base address overflow"))?;
-
-    let mut strings_blob = Vec::new();
-    let mut offsets = Vec::with_capacity(emit_strings.len());
-    for s in emit_strings {
-        let off: u32 = strings_blob
-            .len()
-            .try_into()
-            .context("emit strings blob exceeds addressable range")?;
-        offsets.push(off);
-        strings_blob.extend_from_slice(s.as_bytes());
-        strings_blob.push(0);
-    }
-
-    let mut blob = Vec::with_capacity(pointer_table_bytes as usize + strings_blob.len());
-    blob.extend_from_slice(&count.to_le_bytes());
-    for off in offsets {
-        let ptr = strings_base
-            .checked_add(off)
-            .ok_or_else(|| anyhow!("emit string pointer overflow"))?;
-        blob.extend_from_slice(&ptr.to_le_bytes());
-    }
-    blob.extend_from_slice(&strings_blob);
-    Ok(blob)
+fn emit_mov_byte_abs(out: &mut Vec<u8>, addr: u32, value: u8) {
+    // mov byte ptr [abs32], imm8
+    // C6 05 <addr32> <imm8>
+    out.push(0xC6);
+    out.push(0x05);
+    out.extend_from_slice(&addr.to_le_bytes());
+    out.push(value);
 }
 
 fn write_object_temp(exe_path: &Path, obj_bytes: &[u8]) -> Result<PathBuf> {
