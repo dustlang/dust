@@ -113,6 +113,11 @@ cargo run -p dust -- obj kernel.ds --bare-metal -o kernel.bin
 cargo run -p dust -- obj mymodule.ds -o mymodule.o
 ```
 
+### Build + link a multi-object bare-metal kernel
+```bash
+cargo run -p dust -- kernel-link xdv-kernel/sector/xdv_kernel/src xdv-runtime/src xdv-xdvfs/src --entry main -o target/dust/xdv-kernel.bin
+```
+
 ---
 
 ## Dust Runtime (dust_runtime/)

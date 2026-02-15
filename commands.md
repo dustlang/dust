@@ -116,6 +116,40 @@ dust run examples/K/k_hello_world.ds -- --help
 
 ---
 
+## `dust kernel-link`
+
+Compile multiple DPL modules to relocatable objects and link a bare-metal kernel image.
+
+### Usage
+
+```bash
+dust kernel-link <input> [<input> ...] [options]
+```
+
+Where each `<input>` is a `.ds` file or a directory.
+
+### Key options
+
+- `--out <path>`: output kernel binary (default: `target/dust/kernel.bin`)
+- `--obj-dir <path>`: intermediate object directory
+- `--entry <name>`: K entry proc name (default: `main`)
+- `--start-symbol <name>`: linked start symbol (default: `_dust_kernel_start`)
+- `--target <triple>`: object target triple (default: `x86_64-pc-none-elf`)
+- `--linker <cmd>`: external linker command (default: `ld.lld`)
+- `--skip-tests <bool>`: skip `*_tests.ds` modules (default: `true`)
+
+### Example
+
+```bash
+dust kernel-link xdv-kernel/sector/xdv_kernel/src \
+                 xdv-runtime/src \
+                 xdv-xdvfs/src \
+                 --entry main \
+                 --out target/dust/xdv-kernel.bin
+```
+
+---
+
 ## Output Layout
 
 Default build outputs:
