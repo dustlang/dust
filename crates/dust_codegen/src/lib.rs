@@ -628,45 +628,30 @@ fn build_kernel_binary(
     // cli
     let mut kernel = vec![0xFA];
 
-    let mut row: u32 = 0;
-    let mut col: u32 = 0;
-
+    // Flatten emits into display lines and keep the most recent VGA_ROWS lines
+    // so late boot messages (including shell launch) are visible.
+    let mut lines: Vec<String> = Vec::new();
     for s in emit_strings {
-        for &b in s.as_bytes() {
-            if b == b'\r' {
-                continue;
-            }
-            if b == b'\n' {
-                row = row.saturating_add(1);
-                col = 0;
-                continue;
-            }
+        let sanitized = s.replace('\r', "");
+        for part in sanitized.split('\n') {
+            lines.push(part.to_string());
+        }
+    }
+    if lines.len() > VGA_ROWS as usize {
+        let keep_from = lines.len() - (VGA_ROWS as usize);
+        lines = lines.split_off(keep_from);
+    }
 
-            if row >= VGA_ROWS {
-                break;
-            }
-            if col >= VGA_COLS {
-                row = row.saturating_add(1);
-                col = 0;
-                if row >= VGA_ROWS {
-                    break;
-                }
-            }
-
+    for (row_idx, line) in lines.iter().enumerate() {
+        let row = row_idx as u32;
+        for (col_idx, b) in line.as_bytes().iter().take(VGA_COLS as usize).enumerate() {
+            let col = col_idx as u32;
             let cell_addr = VGA_TEXT_BASE
                 .checked_add(row.saturating_mul(VGA_ROW_BYTES))
                 .and_then(|v| v.checked_add(col.saturating_mul(2)))
                 .ok_or_else(|| anyhow!("vga address overflow"))?;
-            emit_mov_byte_abs(&mut kernel, cell_addr, b);
+            emit_mov_byte_abs(&mut kernel, cell_addr, *b);
             emit_mov_byte_abs(&mut kernel, cell_addr + 1, VGA_ATTR_DEFAULT);
-            col = col.saturating_add(1);
-        }
-
-        if row + 1 < VGA_ROWS {
-            row = row.saturating_add(1);
-            col = 0;
-        } else {
-            break;
         }
     }
 
