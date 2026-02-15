@@ -98,7 +98,7 @@ pub fn build_executable(dir: &DirProgram, out_path: &Path) -> Result<PathBuf> {
         find_k_main(dir, "main").context("DIR does not contain a codegen-capable K::main")?;
 
     // Validate supported subset and extract emit payloads
-    let emit_strings = extract_emit_strings(&main.body)?;
+    let emit_strings = extract_emit_strings(dir, &main)?;
 
     // Build object with Cranelift
     let obj_bytes = build_object_with_main(&emit_strings)?;
@@ -131,7 +131,7 @@ pub fn build_object_file_with_config(
         .context("DIR does not contain a codegen-capable K::main")?;
 
     // Validate supported subset and extract emit payloads
-    let emit_strings = extract_emit_strings(&main.body)?;
+    let emit_strings = extract_emit_strings(dir, &main)?;
 
     // Build object with Cranelift
     let obj_bytes = build_object_with_config(&emit_strings, config)?;
@@ -153,7 +153,7 @@ pub fn build_bare_metal_kernel(dir: &DirProgram, out_path: &Path) -> Result<Path
         .context("DIR does not contain a codegen-capable K::main")?;
 
     // Validate supported subset and extract emit payloads
-    let emit_strings = extract_emit_strings(&main.body)?;
+    let emit_strings = extract_emit_strings(dir, &main)?;
 
     // Build flat binary for bare metal
     let binary = build_flat_binary(&emit_strings, &config)?;
@@ -177,7 +177,7 @@ pub fn build_object_file_for_target(
         find_k_main(dir, "main").context("DIR does not contain a codegen-capable K::main")?;
 
     // Validate supported subset and extract emit payloads
-    let emit_strings = extract_emit_strings(&main.body)?;
+    let emit_strings = extract_emit_strings(dir, &main)?;
 
     // Build object with Cranelift for specific target
     let obj_bytes = build_object_with_target(&emit_strings, target_triple)?;
@@ -227,26 +227,112 @@ fn find_k_main(dir: &DirProgram, entry_point: &str) -> Result<DirProc> {
     bail!("no K::{} found", entry_point)
 }
 
-fn extract_emit_strings(stmts: &[DirStmt]) -> Result<Vec<String>> {
+fn extract_emit_strings(dir: &DirProgram, entry: &DirProc) -> Result<Vec<String>> {
+    let proc_index = index_k_procs(dir)?;
     let mut out = Vec::new();
+    let mut call_stack = Vec::new();
+    collect_emit_strings_from_proc(entry, &proc_index, &mut call_stack, &mut out)?;
+    Ok(out)
+}
 
-    for s in stmts {
-        match s {
-            DirStmt::Effect { kind, payload } => {
-                if kind != "emit" {
-                    bail!("unsupported effect kind in codegen v0.1: {}", kind);
-                }
-                let decoded = decode_string_literal(payload).with_context(|| {
-                    format!("emit payload must be a string literal, got: {}", payload)
-                })?;
-                out.push(decoded);
+fn index_k_procs(dir: &DirProgram) -> Result<HashMap<String, DirProc>> {
+    let mut out = HashMap::new();
+    for forge in &dir.forges {
+        for p in &forge.procs {
+            if p.regime != "K" {
+                continue;
             }
-            // For the executable milestone, we support only emit statements in main.
-            other => bail!("unsupported statement in v0.1 codegen main: {:?}", other),
+            if out.contains_key(&p.name) {
+                bail!(
+                    "ambiguous K::{} across forges; v0.1 codegen requires unique K proc names",
+                    p.name
+                );
+            }
+            out.insert(p.name.clone(), p.clone());
         }
     }
-
     Ok(out)
+}
+
+fn collect_emit_strings_from_proc(
+    proc: &DirProc,
+    proc_index: &HashMap<String, DirProc>,
+    call_stack: &mut Vec<String>,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    call_stack.push(proc.name.clone());
+    for s in &proc.body {
+        match s {
+            DirStmt::Effect { kind, payload } => {
+                if kind == "emit" {
+                    let decoded = decode_string_literal(payload).with_context(|| {
+                        format!("emit payload must be a string literal, got: {}", payload)
+                    })?;
+                    out.push(decoded);
+                    continue;
+                }
+
+                if kind == "expr" {
+                    let callee_name = parse_zero_arg_call_expr(payload)?;
+                    if call_stack.iter().any(|n| n == &callee_name) {
+                        call_stack.push(callee_name.clone());
+                        bail!(
+                            "recursive K call not supported in v0.1 codegen: {}",
+                            call_stack.join(" -> ")
+                        );
+                    }
+                    let callee = proc_index.get(&callee_name).ok_or_else(|| {
+                        anyhow!(
+                            "unsupported expr in v0.1 codegen: '{}' (callee K::{} not found)",
+                            payload,
+                            callee_name
+                        )
+                    })?;
+                    collect_emit_strings_from_proc(callee, proc_index, call_stack, out)?;
+                    continue;
+                }
+
+                bail!("unsupported effect kind in codegen v0.1: {}", kind);
+            }
+            DirStmt::Return { .. } => {}
+            other => bail!(
+                "unsupported statement in v0.1 codegen proc '{}': {:?}",
+                proc.name,
+                other
+            ),
+        }
+    }
+    let _ = call_stack.pop();
+    Ok(())
+}
+
+fn parse_zero_arg_call_expr(payload: &str) -> Result<String> {
+    let p = payload.trim();
+    let open = p.find('(').ok_or_else(|| anyhow!("unsupported expr payload: {}", p))?;
+    let close = p
+        .rfind(')')
+        .ok_or_else(|| anyhow!("unsupported expr payload: {}", p))?;
+    if close < open {
+        bail!("unsupported expr payload: {}", p);
+    }
+    let target = p[..open].trim();
+    let args = p[open + 1..close].trim();
+    if target.is_empty() {
+        bail!("unsupported expr payload: {}", p);
+    }
+    if !args.is_empty() {
+        bail!(
+            "unsupported expr payload (arguments not supported in v0.1 codegen): {}",
+            p
+        );
+    }
+    if !target
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        bail!("unsupported expr payload target: {}", target);
+    }
+    Ok(target.to_string())
 }
 
 /// `dust_semantics::lower_to_dir` serializes string literals as `format!("{:?}", s)`,
@@ -519,29 +605,103 @@ fn build_object_for_triple_with_config(
     Ok(obj.write().context("emit object")?)
 }
 
-/// Build kernel binary for bare-metal (returns machine code)
+/// Kernel load address when loaded by xdv-os boot sector (32-bit PM at 64KB)
+const KERNEL_LOAD_32: u32 = 0x10000;
+/// VGA text buffer (mode 3)
+const VGA_BASE: u32 = 0xB8000;
+
+/// Build kernel binary for bare-metal: 32-bit code that prints emit strings to VGA then halts.
+/// Layout: [entry + write_str + main code][string data]. Load at KERNEL_LOAD_32.
 fn build_kernel_binary(
     emit_strings: &[String],
-    triple: &Triple,
-    config: &BuildConfig,
+    _triple: &Triple,
+    _config: &BuildConfig,
 ) -> Result<Vec<u8>> {
-    // For bare-metal, we generate a simple binary
-    // The actual kernel entry point will be at base_address
-    let mut code = Vec::new();
-
-    // Simple x86-64 machine code that does nothing but return
-    // This is a placeholder - real kernel would have actual code
-    // For now, just emit the string data and a simple ret
-
-    for s in emit_strings {
-        // Emit strings as data
-        code.extend_from_slice(s.as_bytes());
-        code.push(0); // null terminator
+    if emit_strings.is_empty() {
+        let mut code = Vec::new();
+        code.extend_from_slice(&[0xFA]); // cli
+        code.extend_from_slice(&[0xF4]); // hlt
+        code.extend_from_slice(&[0xEB, 0xFE]); // jmp -2
+        return Ok(code);
     }
 
-    // Simple return instruction (for bare metal entry)
-    code.extend_from_slice(&[0xC3]); // retq
+    // Build data: str0\0str1\0...
+    let mut data = Vec::new();
+    let mut offsets = Vec::new();
+    for s in emit_strings {
+        offsets.push(data.len() as u32);
+        data.extend_from_slice(s.as_bytes());
+        data.push(0);
+    }
 
+    // Placeholder for addresses we'll fix up (4 bytes each)
+    const PLACEHOLDER: u32 = 0xDEADBEEF;
+    let mut code = Vec::new();
+
+    // write_str: write null-terminated string at [esi] to VGA [edi], attribute 0x0F. Clobbers eax.
+    // lodsb; test al,al; jz 1f; mov [edi],al; add edi,2; mov byte [edi-1],0x0F; jmp write_str; 1: ret
+    let write_str: &[u8] = &[
+        0xAC, // lodsb
+        0x84, 0xC0, // test al, al
+        0x74, 0x0B, // jz +11 (to ret)
+        0x88, 0x07, // mov [edi], al
+        0x83, 0xC7, 0x02, // add edi, 2
+        0xC6, 0x47, 0xFF, 0x0F, // mov byte [edi-1], 0x0F
+        0xEB, 0xF0, // jmp write_str (back to lodsb)
+        0xC3, // ret
+    ];
+
+    // _start: set VGA base, jump over helper routine, then print each string.
+    code.extend_from_slice(&[0xBF]); // mov edi, VGA_BASE
+    code.extend_from_slice(&VGA_BASE.to_le_bytes());
+
+    // Jump past write_str helper so entry doesn't execute helper body directly.
+    let entry_jmp_off = code.len();
+    code.extend_from_slice(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32 (patched below)
+
+    let write_str_off = code.len() as u32;
+    code.extend_from_slice(write_str);
+
+    let main_start_off = code.len() as u32;
+    let entry_jmp_rel = (main_start_off as i32) - (entry_jmp_off as i32 + 5);
+    code[entry_jmp_off + 1..entry_jmp_off + 5].copy_from_slice(&entry_jmp_rel.to_le_bytes());
+
+    for (i, &off) in offsets.iter().enumerate() {
+        // mov esi, KERNEL_LOAD_32 + code_len + off
+        code.extend_from_slice(&[0xBE]); // mov esi, imm32
+        code.extend_from_slice(&PLACEHOLDER.to_le_bytes());
+        // Preserve start-of-line cursor in EBX before write_str mutates EDI.
+        code.extend_from_slice(&[0x89, 0xFB]); // mov ebx, edi
+        code.extend_from_slice(&[0xE8]); // call write_str (relative); rip after imm32 = code.len()+4
+        let call_offset = (write_str_off as i32 - (code.len() + 4) as i32) as u32;
+        code.extend_from_slice(&call_offset.to_le_bytes());
+        // Move to next text row, column 0.
+        code.extend_from_slice(&[0x89, 0xDF]); // mov edi, ebx
+        code.extend_from_slice(&[0x81, 0xC7, 0xA0, 0x00, 0x00, 0x00]); // add edi, 160
+    }
+
+    code.extend_from_slice(&[0xFA]); // cli
+    code.extend_from_slice(&[0xF4]); // hlt
+    code.extend_from_slice(&[0xEB, 0xFE]); // jmp -2
+
+    let code_len = code.len() as u32;
+    let data_base = KERNEL_LOAD_32 + code_len;
+
+    // Fix up each "mov esi, PLACEHOLDER": find 0xBE and replace next 4 bytes with data_base + offsets[n]
+    let mut str_idx = 0usize;
+    let mut i = 0usize;
+    while i + 5 <= code.len() && str_idx < offsets.len() {
+        if code[i] == 0xBE {
+            let addr = data_base + offsets[str_idx];
+            code[i + 1..i + 5].copy_from_slice(&addr.to_le_bytes());
+            str_idx += 1;
+            i += 5;
+        } else {
+            i += 1;
+        }
+    }
+
+    code.extend_from_slice(&data);
     Ok(code)
 }
 
