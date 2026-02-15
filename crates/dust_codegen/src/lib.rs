@@ -607,102 +607,87 @@ fn build_object_for_triple_with_config(
 
 /// Kernel load address when loaded by xdv-os boot sector (32-bit PM at 64KB)
 const KERNEL_LOAD_32: u32 = 0x10000;
-/// VGA text buffer (mode 3)
-const VGA_BASE: u32 = 0xB8000;
+/// Kernel sector window reserved by xdv-os boot stage (128 * 512 bytes).
+const KERNEL_MAX_BYTES: usize = 128 * 512;
+/// Marker for `mov esi, imm32` patch in `kernel_shell_stub.asm`.
+const EMIT_TABLE_PATCH: [u8; 5] = [0xBE, 0xAA, 0xAA, 0xAA, 0xAA];
 
-/// Build kernel binary for bare-metal: 32-bit code that prints emit strings to VGA then halts.
-/// Layout: [entry + write_str + main code][string data]. Load at KERNEL_LOAD_32.
+/// Build kernel binary for bare-metal:
+/// - prints all `emit` strings collected from the K::main call graph
+/// - enters an interactive keyboard-driven shell loop in VGA text mode
+/// Layout:
+/// [interactive shell stub][emit table: count + pointers + strings]
 fn build_kernel_binary(
     emit_strings: &[String],
     _triple: &Triple,
     _config: &BuildConfig,
 ) -> Result<Vec<u8>> {
-    if emit_strings.is_empty() {
-        let mut code = Vec::new();
-        code.extend_from_slice(&[0xFA]); // cli
-        code.extend_from_slice(&[0xF4]); // hlt
-        code.extend_from_slice(&[0xEB, 0xFE]); // jmp -2
-        return Ok(code);
+    // Preassembled 32-bit interactive VGA + keyboard shell.
+    let mut kernel = include_bytes!("kernel_shell_stub.bin").to_vec();
+
+    let patch_pos = kernel
+        .windows(EMIT_TABLE_PATCH.len())
+        .position(|w| w == EMIT_TABLE_PATCH)
+        .ok_or_else(|| anyhow!("kernel shell stub patch marker not found"))?;
+
+    let table_addr = KERNEL_LOAD_32
+        .checked_add(kernel.len() as u32)
+        .ok_or_else(|| anyhow!("kernel shell stub exceeds addressable load window"))?;
+    kernel[patch_pos + 1..patch_pos + 5].copy_from_slice(&table_addr.to_le_bytes());
+
+    let emit_table = build_emit_table_blob(emit_strings, table_addr)?;
+    kernel.extend_from_slice(&emit_table);
+
+    if kernel.len() > KERNEL_MAX_BYTES {
+        bail!(
+            "bare-metal kernel too large: {} bytes exceeds {}-byte sector window",
+            kernel.len(),
+            KERNEL_MAX_BYTES
+        );
     }
 
-    // Build data: str0\0str1\0...
-    let mut data = Vec::new();
-    let mut offsets = Vec::new();
+    Ok(kernel)
+}
+
+fn build_emit_table_blob(emit_strings: &[String], table_addr: u32) -> Result<Vec<u8>> {
+    let count: u32 = emit_strings
+        .len()
+        .try_into()
+        .context("too many emit strings for bare-metal table")?;
+    let pointer_table_bytes = 4u32
+        .checked_add(
+            count
+                .checked_mul(4)
+                .ok_or_else(|| anyhow!("emit pointer table overflow"))?,
+        )
+        .ok_or_else(|| anyhow!("emit pointer table overflow"))?;
+
+    let strings_base = table_addr
+        .checked_add(pointer_table_bytes)
+        .ok_or_else(|| anyhow!("emit table base address overflow"))?;
+
+    let mut strings_blob = Vec::new();
+    let mut offsets = Vec::with_capacity(emit_strings.len());
     for s in emit_strings {
-        offsets.push(data.len() as u32);
-        data.extend_from_slice(s.as_bytes());
-        data.push(0);
+        let off: u32 = strings_blob
+            .len()
+            .try_into()
+            .context("emit strings blob exceeds addressable range")?;
+        offsets.push(off);
+        strings_blob.extend_from_slice(s.as_bytes());
+        strings_blob.push(0);
     }
 
-    // Placeholder for addresses we'll fix up (4 bytes each)
-    const PLACEHOLDER: u32 = 0xDEADBEEF;
-    let mut code = Vec::new();
-
-    // write_str: write null-terminated string at [esi] to VGA [edi], attribute 0x0F. Clobbers eax.
-    // lodsb; test al,al; jz 1f; mov [edi],al; add edi,2; mov byte [edi-1],0x0F; jmp write_str; 1: ret
-    let write_str: &[u8] = &[
-        0xAC, // lodsb
-        0x84, 0xC0, // test al, al
-        0x74, 0x0B, // jz +11 (to ret)
-        0x88, 0x07, // mov [edi], al
-        0x83, 0xC7, 0x02, // add edi, 2
-        0xC6, 0x47, 0xFF, 0x0F, // mov byte [edi-1], 0x0F
-        0xEB, 0xF0, // jmp write_str (back to lodsb)
-        0xC3, // ret
-    ];
-
-    // _start: set VGA base, jump over helper routine, then print each string.
-    code.extend_from_slice(&[0xBF]); // mov edi, VGA_BASE
-    code.extend_from_slice(&VGA_BASE.to_le_bytes());
-
-    // Jump past write_str helper so entry doesn't execute helper body directly.
-    let entry_jmp_off = code.len();
-    code.extend_from_slice(&[0xE9, 0x00, 0x00, 0x00, 0x00]); // jmp rel32 (patched below)
-
-    let write_str_off = code.len() as u32;
-    code.extend_from_slice(write_str);
-
-    let main_start_off = code.len() as u32;
-    let entry_jmp_rel = (main_start_off as i32) - (entry_jmp_off as i32 + 5);
-    code[entry_jmp_off + 1..entry_jmp_off + 5].copy_from_slice(&entry_jmp_rel.to_le_bytes());
-
-    for (i, &off) in offsets.iter().enumerate() {
-        // mov esi, KERNEL_LOAD_32 + code_len + off
-        code.extend_from_slice(&[0xBE]); // mov esi, imm32
-        code.extend_from_slice(&PLACEHOLDER.to_le_bytes());
-        // Preserve start-of-line cursor in EBX before write_str mutates EDI.
-        code.extend_from_slice(&[0x89, 0xFB]); // mov ebx, edi
-        code.extend_from_slice(&[0xE8]); // call write_str (relative); rip after imm32 = code.len()+4
-        let call_offset = (write_str_off as i32 - (code.len() + 4) as i32) as u32;
-        code.extend_from_slice(&call_offset.to_le_bytes());
-        // Move to next text row, column 0.
-        code.extend_from_slice(&[0x89, 0xDF]); // mov edi, ebx
-        code.extend_from_slice(&[0x81, 0xC7, 0xA0, 0x00, 0x00, 0x00]); // add edi, 160
+    let mut blob = Vec::with_capacity(pointer_table_bytes as usize + strings_blob.len());
+    blob.extend_from_slice(&count.to_le_bytes());
+    for off in offsets {
+        let ptr = strings_base
+            .checked_add(off)
+            .ok_or_else(|| anyhow!("emit string pointer overflow"))?;
+        blob.extend_from_slice(&ptr.to_le_bytes());
     }
-
-    code.extend_from_slice(&[0xFA]); // cli
-    code.extend_from_slice(&[0xF4]); // hlt
-    code.extend_from_slice(&[0xEB, 0xFE]); // jmp -2
-
-    let code_len = code.len() as u32;
-    let data_base = KERNEL_LOAD_32 + code_len;
-
-    // Fix up each "mov esi, PLACEHOLDER": find 0xBE and replace next 4 bytes with data_base + offsets[n]
-    let mut str_idx = 0usize;
-    let mut i = 0usize;
-    while i + 5 <= code.len() && str_idx < offsets.len() {
-        if code[i] == 0xBE {
-            let addr = data_base + offsets[str_idx];
-            code[i + 1..i + 5].copy_from_slice(&addr.to_le_bytes());
-            str_idx += 1;
-            i += 5;
-        } else {
-            i += 1;
-        }
-    }
-
-    code.extend_from_slice(&data);
-    Ok(code)
+    blob.extend_from_slice(&strings_blob);
+    Ok(blob)
 }
 
 fn write_object_temp(exe_path: &Path, obj_bytes: &[u8]) -> Result<PathBuf> {
