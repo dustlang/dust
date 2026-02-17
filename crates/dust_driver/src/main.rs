@@ -450,6 +450,10 @@ fn cmd_kernel_link(
     linker: &str,
     skip_tests: bool,
 ) -> Result<()> {
+    eprintln!(
+        "warning: 'dust kernel-link' is deprecated; use 'dust obj' and link with 'dustlink' instead"
+    );
+
     let source_files = collect_ds_files_from_inputs(inputs, skip_tests)?;
     if source_files.is_empty() {
         bail!("kernel-link: no source files found from provided inputs");
@@ -493,11 +497,17 @@ fn cmd_kernel_link(
         true,
     )?;
 
+    let entry_symbol = entry
+        .split("::")
+        .filter(|s| !s.is_empty())
+        .last()
+        .unwrap_or(entry);
+
     let bootstrap_obj = dust_codegen::build_kernel_bootstrap_object(
         &obj_root.join("__dust_kernel_start.o"),
         target,
         start_symbol,
-        entry,
+        entry_symbol,
     )?;
 
     let out_path = out
