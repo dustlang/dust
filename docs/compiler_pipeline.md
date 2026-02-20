@@ -36,6 +36,16 @@ DIR is used as the input contract for code generation and JSON emission.
 - `dust_codegen::build_executable(dir, out_path)`
 - codegen builds a temporary object and links via system toolchain
 
+Host link attempt order for general builds:
+
+1. `dustlink`
+2. driver + `-fuse-ld=lld`
+3. `rust-lld`
+4. `ld.lld`
+5. driver default linker
+
+Bootstrap build of `dustlink` itself skips step 1 to avoid recursive self-invocation.
+
 ## `obj`
 
 Depending on flags:
@@ -57,10 +67,8 @@ Pipeline:
 
 ## Link Step (Native Build)
 
-Native executable linking uses:
-
-- Unix/macOS: `cc` (or env `CC`)
-- Windows: `clang` (or env `CC`)
+Native executable linking starts from the attempt order above.  
+The compiler driver (`cc`/`clang` or env `CC`) is still used in fallback paths.
 
 ## Link Step (Kernel Link)
 
@@ -72,3 +80,6 @@ Native executable linking uses:
 - `--image-base 0x100000`
 - `-Ttext 0x100000`
 - `-e <start_symbol>`
+
+Note: `kernel-link` is a compatibility path and marked deprecated in-driver.  
+Preferred kernel flow is object emission via `dust obj` followed by `dustlink`.

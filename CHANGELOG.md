@@ -71,11 +71,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for both `.ds` and `.dust` file extensions
 - DPL project structure (sector directories)
 
+#### Host Link and Toolchain Integration
+- Host link resolution now prefers `dustlink` for general executable builds, with ordered `lld` fallbacks.
+- Bootstrap exception for building `dustlink` itself to avoid recursive self-linking.
+- Expanded host runtime shim coverage for Dust-built host tooling workflows (argv/fs/path/string/linker helper intrinsics).
+
 ### Changed
 
 - Minimum Rust version updated to support new features
 - Default build output directory structure updated
 - Error messages improved for new syntax
+- `dust kernel-link` is explicitly deprecated in favor of `dust obj` + `dustlink` workflow guidance.
 
 ### Fixed
 

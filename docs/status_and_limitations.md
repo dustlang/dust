@@ -8,8 +8,16 @@
 ## Current Effective Constraints
 
 - many default compile paths still rely on emit/call subset extraction
+- host executable expression/statement lowering is still partial for full-feature CLI tools
 - full coverage of all parser/AST constructs in codegen is not yet end-to-end
 - Q and Phi are not first-class executable codegen targets in standard paths
+
+## Recent Progress
+
+- host executable link path now prefers `dustlink` with explicit `lld` fallback order
+- bootstrap guard for building `dustlink` avoids recursive self-link
+- kernel workflows are documented around `obj` + `dustlink` with `kernel-link` as compatibility mode
+- host runtime shim grew linker-oriented intrinsics used by Dust-built `dustlink`
 
 ## Important Mismatches to Track
 

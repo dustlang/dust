@@ -6,7 +6,6 @@ Primary source: `crates/dust_codegen/src/lib.rs`
 
 - `build_executable(dir, out_path)`
 - `build_object_file(dir, out_path)`
-- `build_object_file_with_config(dir, out_path, config)`
 - `build_object_file_for_target(dir, out_path, target_triple)`
 - `build_bare_metal_kernel(dir, out_path)`
 - `merge_dir_programs(programs)`
@@ -20,7 +19,36 @@ Primary source: `crates/dust_codegen/src/lib.rs`
 1. finds `K::<entry>` (`main` by default from driver path)
 2. extracts supported emit/call subset from DIR
 3. generates object via Cranelift
-4. links with host system linker toolchain
+4. links host executable via ordered linker attempts
+
+## Host Linker Attempt Order
+
+General host executable build:
+
+1. `dustlink` (preferred)
+2. compiler driver + `-fuse-ld=lld`
+3. `rust-lld`
+4. `ld.lld`
+5. compiler driver default linker
+
+Bootstrap build of `dustlink` executable itself:
+
+1. compiler driver + `-fuse-ld=lld`
+2. `rust-lld`
+3. `ld.lld` (platform-dependent)
+4. compiler driver default linker
+
+This bootstrap exception prevents recursive self-linking while producing `dustlink.exe`.
+
+## Host Runtime Shim Surface
+
+`crates/dust_codegen/src/host_runtime_shim.rs` provides host intrinsics used by Dust-built host executables (including `dustlink`):
+
+- argv/string/path/fs helpers
+- archive probing/extraction helpers
+- linker state accessors for object/symbol/relocation operations
+- output writers for ELF/flat/MBR/PE/Mach-O image paths
+- linker script apply hook used by `-T/--script`
 
 ## Object Path
 

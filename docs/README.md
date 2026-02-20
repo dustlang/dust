@@ -23,6 +23,10 @@ The following existing files remain part of the repository history and analysis 
 - `IMPLEMENTATION_ANALYSIS.md`
 - `V02_COMPLIANCE.md`
 
+## Release Notes
+
+Compiler change history is tracked in `../CHANGELOG.md`.
+
 ## Normative Language Reference
 
 The language specification is normative and lives under `dust/spec`.

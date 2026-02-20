@@ -17,12 +17,12 @@ dust obj xdv-kernel/sector/xdv_kernel/src xdv-runtime/src xdv-xdvfs/src --target
 ## Linking Example
 
 ```bash
-dustlink -m elf_x86_64 -nostdlib --oformat=binary --image-base 0x100000 -Ttext 0x100000 -e _dust_kernel_start -o target/dust/kernel.bin <objects...>
+dustlink --oformat=binary --image-base 0x100000 -Ttext 0x100000 -e _dust_kernel_start -o target/dust/kernel.bin <objects...>
 ```
 
 ## Legacy `kernel-link`
 
-Still available and useful for quick integration, but now emits a deprecation warning and should be treated as compatibility path.
+Still available for quick integration, but emits a deprecation warning and should be treated as compatibility path.
 
 ## Entry Selection Notes
 

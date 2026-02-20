@@ -29,6 +29,8 @@ It orchestrates:
   -> system linker or external linker path
 ```
 
+For host executable builds, the linker path prefers `dustlink` first and then falls back through `lld`-compatible paths.
+
 ## Command Surface
 
 `dust` currently exposes:
@@ -47,3 +49,4 @@ The compiler supports multiple output modes, but runtime codegen coverage is sti
 - native executable path focuses on K-regime `emit`-centric extraction
 - object and bare-metal paths support kernel-oriented workflows
 - several v0.2-related structures and helper modules exist but are not fully wired end-to-end
+- recommended multi-object kernel flow is `dust obj` + `dustlink`

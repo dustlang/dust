@@ -3,6 +3,7 @@
 use dust_dir::*;
 use dust_frontend::ast::*;
 use dust_frontend::{Lexer, Parser};
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct CheckError {
@@ -79,6 +80,13 @@ pub fn lower_to_dir(file: &FileAst) -> DirProgram {
     let mut forges = Vec::new();
 
     for f in &file.forges {
+        let mut forge_consts: HashMap<String, String> = HashMap::new();
+        for item in &f.node.items {
+            if let Item::Const(c) = &item.node {
+                forge_consts.insert(c.name.text.clone(), literal_to_string(&c.value.node));
+            }
+        }
+
         let mut shapes = Vec::new();
         let mut procs = Vec::new();
         let mut binds = Vec::new();
@@ -99,7 +107,7 @@ pub fn lower_to_dir(file: &FileAst) -> DirProgram {
                     });
                 }
                 Item::Proc(p) => {
-                    procs.push(lower_proc(p));
+                    procs.push(lower_proc(p, &forge_consts));
                 }
                 Item::Bind(b) => {
                     binds.push(DirBind {
@@ -113,13 +121,13 @@ pub fn lower_to_dir(file: &FileAst) -> DirProgram {
                             .map(|cl| DirClause {
                                 key: cl.node.key.text.clone(),
                                 op: contract_op_to_string(&cl.node.op.node),
-                                value: contract_value_to_string(&cl.node.value.node),
+                                value: contract_value_to_string(&cl.node.value.node, &forge_consts),
                             })
                             .collect(),
                     });
                 }
                 Item::Const(_) => {
-                    // Constants are inlined at compile time
+                    // Constants are inlined at compile time.
                 }
             }
         }
@@ -148,7 +156,7 @@ pub fn lower_to_dir(file: &FileAst) -> DirProgram {
     }
 }
 
-fn lower_proc(p: &ProcDecl) -> DirProc {
+fn lower_proc(p: &ProcDecl, consts: &HashMap<String, String>) -> DirProc {
     let regime = match p.sig.node.path.node.regime.node {
         Regime::K => "K",
         Regime::Q => "Q",
@@ -211,7 +219,7 @@ fn lower_proc(p: &ProcDecl) -> DirProc {
         .node
         .stmts
         .iter()
-        .map(|s| lower_stmt(&s.node))
+        .map(|s| lower_stmt(&s.node, consts))
         .collect();
 
     DirProc {
@@ -226,22 +234,42 @@ fn lower_proc(p: &ProcDecl) -> DirProc {
     }
 }
 
-fn lower_stmt(s: &Stmt) -> DirStmt {
+fn lower_stmt(s: &Stmt, consts: &HashMap<String, String>) -> DirStmt {
     match s {
-        Stmt::Let(x) => DirStmt::Let {
-            name: x.name.text.clone(),
-            expr: expr_to_string(&x.expr.node),
-        },
-        Stmt::MutLet(x) => DirStmt::Let {
-            name: x.name.text.clone(),
-            expr: expr_to_string(&x.expr.node),
-        },
+        Stmt::Let(x) => {
+            if let Some((target, args)) = expr_to_call(&x.expr.node, consts) {
+                DirStmt::Call {
+                    target,
+                    args,
+                    result: Some(x.name.text.clone()),
+                }
+            } else {
+                DirStmt::Let {
+                    name: x.name.text.clone(),
+                    expr: expr_to_string(&x.expr.node, consts),
+                }
+            }
+        }
+        Stmt::MutLet(x) => {
+            if let Some((target, args)) = expr_to_call(&x.expr.node, consts) {
+                DirStmt::Call {
+                    target,
+                    args,
+                    result: Some(x.name.text.clone()),
+                }
+            } else {
+                DirStmt::Let {
+                    name: x.name.text.clone(),
+                    expr: expr_to_string(&x.expr.node, consts),
+                }
+            }
+        }
         Stmt::Constrain(x) => DirStmt::Constrain {
-            predicate: expr_to_string(&x.predicate.node),
+            predicate: expr_to_string(&x.predicate.node, consts),
         },
         Stmt::Prove(x) => DirStmt::Prove {
             name: x.name.text.clone(),
-            from: expr_to_string(&x.from.node),
+            from: expr_to_string(&x.from.node, consts),
         },
         Stmt::Effect(x) => DirStmt::Effect {
             kind: match x.kind.node {
@@ -250,42 +278,81 @@ fn lower_stmt(s: &Stmt) -> DirStmt {
                 EffectKind::Seal => "seal",
             }
             .into(),
-            payload: expr_to_string(&x.payload.node),
+            payload: expr_to_string(&x.payload.node, consts),
         },
         Stmt::Return(x) => DirStmt::Return {
-            expr: Some(expr_to_string(&x.expr.node)),
+            expr: Some(expr_to_string(&x.expr.node, consts)),
         },
-        Stmt::If(x) => DirStmt::Effect {
-            kind: "if".into(),
-            payload: format!(
-                "if {} {{ ... }} else {{ ... }}",
-                expr_to_string(&x.condition.node)
-            ),
+        Stmt::If(x) => DirStmt::If {
+            condition: expr_to_string(&x.condition.node, consts),
+            then_body: x
+                .then_block
+                .node
+                .stmts
+                .iter()
+                .map(|s| lower_stmt(&s.node, consts))
+                .collect(),
+            else_body: x.else_block.as_ref().map(|b| {
+                b.node
+                    .stmts
+                    .iter()
+                    .map(|s| lower_stmt(&s.node, consts))
+                    .collect()
+            }),
         },
-        Stmt::For(x) => DirStmt::Effect {
-            kind: "for".into(),
-            payload: format!(
-                "for {} in {}..{{ ... }}",
-                x.var.text,
-                expr_to_string(&x.start.node)
-            ),
+        Stmt::For(x) => DirStmt::For {
+            var: x.var.text.clone(),
+            start: expr_to_string(&x.start.node, consts),
+            end: expr_to_string(&x.end.node, consts),
+            body: x
+                .body
+                .node
+                .stmts
+                .iter()
+                .map(|s| lower_stmt(&s.node, consts))
+                .collect(),
         },
-        Stmt::While(x) => DirStmt::Effect {
-            kind: "while".into(),
-            payload: format!("while {} {{ ... }}", expr_to_string(&x.condition.node)),
+        Stmt::While(x) => DirStmt::While {
+            condition: expr_to_string(&x.condition.node, consts),
+            body: x
+                .body
+                .node
+                .stmts
+                .iter()
+                .map(|s| lower_stmt(&s.node, consts))
+                .collect(),
         },
-        Stmt::Break(_) => DirStmt::Effect {
-            kind: "break".into(),
-            payload: "break".into(),
-        },
-        Stmt::Continue(_) => DirStmt::Effect {
-            kind: "continue".into(),
-            payload: "continue".into(),
-        },
-        Stmt::Expr(x) => DirStmt::Effect {
-            kind: "expr".into(),
-            payload: expr_to_string(&x.expr.node),
-        },
+        Stmt::Break(_) => DirStmt::Break,
+        Stmt::Continue(_) => DirStmt::Continue,
+        Stmt::Expr(x) => {
+            if let Some((target, args)) = expr_to_call(&x.expr.node, consts) {
+                DirStmt::Call {
+                    target,
+                    args,
+                    result: None,
+                }
+            } else {
+                DirStmt::Effect {
+                    kind: "expr".into(),
+                    payload: expr_to_string(&x.expr.node, consts),
+                }
+            }
+        }
+    }
+}
+
+fn expr_to_call(e: &Expr, consts: &HashMap<String, String>) -> Option<(String, Vec<String>)> {
+    if let Expr::Call(c) = e {
+        let target = expr_to_string(&c.node.callee.node, consts);
+        let args = c
+            .node
+            .args
+            .iter()
+            .map(|a| expr_to_string(&a.node, consts))
+            .collect::<Vec<_>>();
+        Some((target, args))
+    } else {
+        None
     }
 }
 
@@ -305,51 +372,54 @@ fn type_to_string(t: &TypeRef) -> String {
     }
 }
 
-fn expr_to_string(e: &Expr) -> String {
+fn expr_to_string(e: &Expr, consts: &HashMap<String, String>) -> String {
     match e {
         Expr::Literal(Literal::Int(n)) => n.to_string(),
         Expr::Literal(Literal::Float(f)) => f.to_string(),
         Expr::Literal(Literal::Bool(b)) => b.to_string(),
         Expr::Literal(Literal::String(s)) => format!("{:?}", s),
         Expr::Literal(Literal::Char(c)) => c.to_string(),
-        Expr::Ident(id) => id.text.clone(),
-        Expr::Paren(inner) => format!("({})", expr_to_string(&inner.node)),
+        Expr::Ident(id) => consts
+            .get(&id.text)
+            .cloned()
+            .unwrap_or_else(|| id.text.clone()),
+        Expr::Paren(inner) => format!("({})", expr_to_string(&inner.node, consts)),
         Expr::Block(b) => format!("{{ ... }}"),
         Expr::Binary(b) => format!(
             "{} {:?} {}",
-            expr_to_string(&b.node.lhs.node),
+            expr_to_string(&b.node.lhs.node, consts),
             b.node.op.node,
-            expr_to_string(&b.node.rhs.node)
+            expr_to_string(&b.node.rhs.node, consts)
         ),
         Expr::Unary(u) => format!(
             "{:?}({})",
             u.node.op.node,
-            expr_to_string(&u.node.operand.node)
+            expr_to_string(&u.node.operand.node, consts)
         ),
         Expr::Call(c) => {
             let args = c
                 .node
                 .args
                 .iter()
-                .map(|a| expr_to_string(&a.node))
+                .map(|a| expr_to_string(&a.node, consts))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{}({})", expr_to_string(&c.node.callee.node), args)
+            format!("{}({})", expr_to_string(&c.node.callee.node, consts), args)
         }
         Expr::Field(f) => format!(
             "{}.{}",
-            expr_to_string(&f.node.base.node),
+            expr_to_string(&f.node.base.node, consts),
             f.node.field.text
         ),
         Expr::Index(i) => format!(
             "{}[{}]",
-            expr_to_string(&i.node.base.node),
-            expr_to_string(&i.node.index.node)
+            expr_to_string(&i.node.base.node, consts),
+            expr_to_string(&i.node.index.node, consts)
         ),
         Expr::Array(arr) => {
             let elements = arr
                 .iter()
-                .map(|e| expr_to_string(&e.node))
+                .map(|e| expr_to_string(&e.node, consts))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("[{}]", elements)
@@ -363,7 +433,7 @@ fn expr_to_string(e: &Expr) -> String {
                     format!(
                         "{}: {}",
                         fi.node.name.text,
-                        expr_to_string(&fi.node.expr.node)
+                        expr_to_string(&fi.node.expr.node, consts)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -379,19 +449,23 @@ fn expr_to_string(e: &Expr) -> String {
                     format!(
                         "{} => {}",
                         match_arm_pattern_to_string(&arm.node.pattern.node),
-                        expr_to_string(&arm.node.body.node)
+                        expr_to_string(&arm.node.body.node, consts)
                     )
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("match {} {{ {} }}", expr_to_string(&m.node.expr.node), arms)
+            format!(
+                "match {} {{ {} }}",
+                expr_to_string(&m.node.expr.node, consts),
+                arms
+            )
         }
     }
 }
 
 fn match_arm_pattern_to_string(p: &MatchPattern) -> String {
     match p {
-        MatchPattern::Literal(lit) => expr_to_string(&Expr::Literal(lit.clone())),
+        MatchPattern::Literal(lit) => literal_to_string(lit),
         MatchPattern::Ident(id) => id.text.clone(),
         MatchPattern::Wildcard => "_".to_string(),
         MatchPattern::Or(a, b) => format!(
@@ -427,9 +501,22 @@ fn contract_op_to_string(op: &ContractOp) -> String {
     .into()
 }
 
-fn contract_value_to_string(v: &ContractValue) -> String {
+fn literal_to_string(lit: &Literal) -> String {
+    match lit {
+        Literal::Int(n) => n.to_string(),
+        Literal::Float(f) => f.to_string(),
+        Literal::Bool(b) => b.to_string(),
+        Literal::String(s) => format!("{:?}", s),
+        Literal::Char(c) => c.to_string(),
+    }
+}
+
+fn contract_value_to_string(v: &ContractValue, consts: &HashMap<String, String>) -> String {
     match v {
-        ContractValue::Ident(id) => id.text.clone(),
+        ContractValue::Ident(id) => consts
+            .get(&id.text)
+            .cloned()
+            .unwrap_or_else(|| id.text.clone()),
         ContractValue::Literal(Literal::Int(n)) => n.to_string(),
         ContractValue::Literal(Literal::Float(f)) => f.to_string(),
         ContractValue::Literal(Literal::Bool(b)) => b.to_string(),

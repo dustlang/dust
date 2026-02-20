@@ -237,12 +237,17 @@ fn cmd_dir(path: &Path, out: &Path, print: bool) -> Result<()> {
 }
 
 fn cmd_build(path: &Path, out: Option<&Path>) -> Result<()> {
-    let file = single_ds_file(path)?;
-    let src = fs::read_to_string(&file)?;
+    let files = build_source_set(path)?;
+    let parse_label = if files.len() == 1 {
+        files[0].display().to_string()
+    } else {
+        format!("{} ({} files)", path.display(), files.len())
+    };
+    let src = combine_sources(&files)?;
     let ast = dust_semantics::parse_and_check(&src).map_err(|e| {
         anyhow!(
             "{}: {} at {}..{}",
-            file.display(),
+            parse_label,
             e.message,
             e.span.start,
             e.span.end
@@ -254,7 +259,7 @@ fn cmd_build(path: &Path, out: Option<&Path>) -> Result<()> {
     // Default output path: target/dust/<stem>
     let out_path = match out {
         Some(p) => p.to_path_buf(),
-        None => default_out_path(&file)?,
+        None => default_out_path_for_input(path, &files)?,
     };
 
     // Ensure parent exists
@@ -599,6 +604,49 @@ fn default_out_path(ds_file: &Path) -> Result<PathBuf> {
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow!("input has no valid file stem"))?;
     Ok(PathBuf::from("target").join("dust").join(stem))
+}
+
+fn default_out_path_for_input(input: &Path, files: &[PathBuf]) -> Result<PathBuf> {
+    if files.is_empty() {
+        bail!("no .ds sources available for build output naming");
+    }
+    if input.is_dir() {
+        let stem = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow!("input directory has no valid name"))?;
+        return Ok(PathBuf::from("target").join("dust").join(stem));
+    }
+    default_out_path(&files[0])
+}
+
+fn combine_sources(files: &[PathBuf]) -> Result<String> {
+    if files.is_empty() {
+        bail!("no .ds sources provided for combined build");
+    }
+
+    let mut combined = String::new();
+    for (idx, file) in files.iter().enumerate() {
+        let src = fs::read_to_string(file)
+            .with_context(|| format!("failed to read source '{}'", file.display()))?;
+        if idx > 0 {
+            combined.push_str("\n\n");
+        }
+        combined.push_str(&src);
+        combined.push('\n');
+    }
+    Ok(combined)
+}
+
+fn build_source_set(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = collect_ds_files(path)?;
+    if path.is_dir() {
+        files.retain(|p| !is_test_module(p));
+    }
+    if files.is_empty() {
+        bail!("no .ds or .dust files found under {}", path.display());
+    }
+    Ok(files)
 }
 
 /// For build/run, require exactly one .ds or .dust file.

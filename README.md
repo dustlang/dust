@@ -15,6 +15,12 @@ This repository contains:
 - **DPL Specification:** v0.2 (**active development**)
 - **Compiler:** v0.2 (**bare-metal and extended feature support**)
 
+### Linker Policy
+
+- Host executable builds prefer `dustlink` as the linker frontend.
+- To bootstrap `dustlink` itself, the compiler bypasses `dustlink` and falls back to `lld` paths (`-fuse-ld=lld`, `rust-lld`, `ld.lld`) before the driver default linker.
+- `dust kernel-link` remains available but is deprecated; use `dust obj` + `dustlink`.
+
 ### What Works Today (v0.2)
 
 The compiler supports multiple output modes:
@@ -115,7 +121,8 @@ cargo run -p dust -- obj mymodule.ds -o mymodule.o
 
 ### Build + link a multi-object bare-metal kernel
 ```bash
-cargo run -p dust -- kernel-link xdv-kernel/sector/xdv_kernel/src xdv-runtime/src xdv-xdvfs/src --entry main -o target/dust/xdv-kernel.bin
+cargo run -p dust -- obj xdv-kernel/sector/xdv_kernel/src xdv-runtime/src xdv-xdvfs/src --target x86_64-pc-none-elf --out-dir target/dust/kernel_objs
+dustlink --oformat=binary --image-base 0x100000 -Ttext 0x100000 -e _dust_kernel_start -o target/dust/xdv-kernel.bin target/dust/kernel_objs/*.o
 ```
 
 ---

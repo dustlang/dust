@@ -87,3 +87,8 @@ warning: 'dust kernel-link' is deprecated; use 'dust obj' and link with 'dustlin
 ```
 
 It performs a multi-source compile and external link sequence for a flat kernel binary.
+
+Recommended replacement:
+
+1. `dust obj <inputs...> --target x86_64-pc-none-elf --out-dir <dir>`
+2. `dustlink --oformat=binary ... -o <kernel.bin> <dir>/*.o`
