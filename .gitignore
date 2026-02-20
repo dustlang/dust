@@ -1,1 +1,20 @@
-target/
+# Build artifacts
+/target/
+
+# Coverage and profiling
+/coverage/
+*.profraw
+*.profdata
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+
+# Editor and OS files
+/.idea/
+/.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

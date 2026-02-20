@@ -6,7 +6,7 @@ This repository contains:
 - the DPL specification (`spec/`)
 - reference examples (`examples/`)
 - the `dust` compiler implementation (Rust)
-- `dust_runtime` - OS services for bare-metal kernels
+- `dust-runtime` - OS services for bare-metal kernels
 
 ---
 
@@ -120,7 +120,7 @@ cargo run -p dust -- kernel-link xdv-kernel/sector/xdv_kernel/src xdv-runtime/sr
 
 ---
 
-## Dust Runtime (dust_runtime/)
+## Dust Runtime (dust-runtime/)
 
 OS services for bare-metal DPL kernels written entirely in DPL:
 

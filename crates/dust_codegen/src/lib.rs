@@ -919,9 +919,6 @@ fn build_object_for_triple_with_config(
 
     let mut module = ObjectModule::new(builder);
     let ptr_ty = module.target_config().pointer_type();
-    let emit_kernel_handoff = emit_strings
-        .iter()
-        .any(|s| s == "xdv-boot: handoff to kernel.bin");
 
     // For bare-metal, we don't declare puts - kernel handles output differently
     let puts_func = if config.mode == BuildMode::BareMetal {
@@ -1031,9 +1028,6 @@ fn build_object_for_triple_with_config(
                     break;
                 }
             }
-            if emit_kernel_handoff {
-                emit_boot_kernel_handoff_call(&mut b, ptr_ty)?;
-            }
         }
 
         let zero = b.ins().iconst(cranelift_codegen::ir::types::I32, 0);
@@ -1053,34 +1047,7 @@ fn build_object_for_triple_with_config(
     Ok(obj.write().context("emit object")?)
 }
 
-/// In boot.bin mode, transfer control to preloaded kernel image.
-/// Reads entry offset from boot record (0x0600 + 44), adds kernel image base
-/// (0x00020000), and performs an indirect call.
-fn emit_boot_kernel_handoff_call(
-    b: &mut FunctionBuilder<'_>,
-    ptr_ty: cranelift_codegen::ir::Type,
-) -> Result<()> {
-    let bootrec_kernel_entry_ptr = b.ins().iconst(ptr_ty, i64::from(0x0600 + 44));
-    let kernel_entry_off_i32 = b.ins().load(
-        cranelift_codegen::ir::types::I32,
-        cranelift_codegen::ir::MemFlags::new(),
-        bootrec_kernel_entry_ptr,
-        0,
-    );
-    let kernel_entry_off_ptr = b.ins().uextend(ptr_ty, kernel_entry_off_i32);
-    let kernel_image_base = b.ins().iconst(ptr_ty, 0x0002_0000);
-    let kernel_entry_addr = b.ins().iadd(kernel_image_base, kernel_entry_off_ptr);
-
-    let mut kernel_sig = Signature::new(b.func.signature.call_conv);
-    kernel_sig
-        .returns
-        .push(AbiParam::new(cranelift_codegen::ir::types::I32));
-    let kernel_sig_ref = b.import_signature(kernel_sig);
-    b.ins().call_indirect(kernel_sig_ref, kernel_entry_addr, &[]);
-    Ok(())
-}
-
-/// Kernel sector window reserved by xdv-os boot stage (128 * 512 bytes).
+/// Bare-metal image size cap for compact bootloaded binaries (128 * 512 bytes).
 const KERNEL_MAX_BYTES: usize = 128 * 512;
 /// VGA text mode base physical address.
 const VGA_TEXT_BASE: u32 = 0xB8000;
@@ -1099,12 +1066,11 @@ fn build_kernel_binary(
     _triple: &Triple,
     _config: &BuildConfig,
 ) -> Result<Vec<u8>> {
-    // 32-bit protected-mode entry as loaded by xdv-os boot stage.
+    // 32-bit protected-mode entry expected by a simple boot stage.
     // cli
     let mut kernel = vec![0xFA];
 
-    // Flatten emits into display lines and keep the most recent VGA_ROWS lines
-    // so late boot messages (including shell launch) are visible.
+    // Flatten emits into display lines and keep the most recent VGA_ROWS lines.
     let mut lines: Vec<String> = Vec::new();
     for s in emit_strings {
         let sanitized = s.replace('\r', "");
