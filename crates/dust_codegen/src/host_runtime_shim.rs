@@ -37,8 +37,10 @@ const SHF_EXECINSTR: u64 = 0x4;
 const SHT_NOBITS: u32 = 8;
 const SHT_PROGBITS: u32 = 1;
 const PT_LOAD: u32 = 1;
+const PT_INTERP: u32 = 3;
 const EM_X86_64: u16 = 62;
 const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
 const EV_CURRENT: u32 = 1;
 
 const FORMAT_ELF64: u32 = 1;
@@ -163,6 +165,15 @@ struct LinkerState {
     pending_elf_entry: u64,
     pending_elf_image_base: u64,
     extracted_members: Vec<PathBuf>,
+    loaded_archive_members: HashSet<String>,
+    archive_progress: u32,
+    group_archive_starts: Vec<u32>,
+    link_shared: bool,
+    link_pie: bool,
+    link_static: bool,
+    link_as_needed: bool,
+    dynamic_linker_path: u64,
+    soname: u64,
 }
 
 static STRINGS: OnceLock<Mutex<Vec<CString>>> = OnceLock::new();
@@ -342,6 +353,377 @@ fn parse_archive_members(path: &Path) -> Option<Vec<ArchiveMember>> {
 fn archive_member_at(path: &Path, logical_index: usize) -> Option<ArchiveMember> {
     let members = parse_archive_members(path)?;
     members.get(logical_index).cloned()
+}
+
+fn archive_member_key(path: &Path, index: u32) -> String {
+    format!("{}#{}", path.to_string_lossy(), index)
+}
+
+fn unresolved_required_symbol_hashes(state: &LinkerState) -> HashSet<u64> {
+    let mut needed = HashSet::new();
+    for object in &state.objects {
+        for symbol in &object.symbols {
+            if symbol.shndx == SHN_UNDEF && symbol.bind != 0 && symbol.name_hash != 0 {
+                let defined = state
+                    .globals
+                    .get(&symbol.name_hash)
+                    .map(|g| g.defined == 1)
+                    .unwrap_or(false);
+                if !defined {
+                    needed.insert(symbol.name_hash);
+                }
+            }
+        }
+    }
+    for hash in &state.required_symbols {
+        if *hash == 0 {
+            continue;
+        }
+        let defined = state
+            .globals
+            .get(hash)
+            .map(|g| g.defined == 1)
+            .unwrap_or(false);
+        if !defined {
+            needed.insert(*hash);
+        }
+    }
+    needed
+}
+
+fn elf_member_defined_hashes(payload: &[u8]) -> HashSet<u64> {
+    let mut out = HashSet::new();
+    if payload.len() < 64 {
+        return out;
+    }
+    if &payload[0..4] != b"\x7fELF" || payload[4] != 2 || payload[5] != 1 {
+        return out;
+    }
+    let shoff = match read_u64_le_at(payload, 40) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    let shentsize = match read_u16_le_at(payload, 58) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    let shnum = match read_u16_le_at(payload, 60) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    if shoff == 0 || shentsize < 64 || shnum == 0 {
+        return out;
+    }
+    let sh_table_size = match shentsize.checked_mul(shnum) {
+        Some(v) => v,
+        None => return out,
+    };
+    let sh_end = match shoff.checked_add(sh_table_size) {
+        Some(v) => v,
+        None => return out,
+    };
+    if sh_end > payload.len() {
+        return out;
+    }
+
+    for sec_idx in 0..shnum {
+        let sh_base = shoff + (sec_idx * shentsize);
+        let sh_type = match read_u32_le_at(payload, sh_base + 4) {
+            Some(v) => v,
+            None => continue,
+        };
+        if sh_type != 2 {
+            continue;
+        }
+        let sym_off = match read_u64_le_at(payload, sh_base + 24) {
+            Some(v) => v as usize,
+            None => continue,
+        };
+        let sym_size = match read_u64_le_at(payload, sh_base + 32) {
+            Some(v) => v as usize,
+            None => continue,
+        };
+        let strtab_index = match read_u32_le_at(payload, sh_base + 40) {
+            Some(v) => v as usize,
+            None => continue,
+        };
+        let sym_entsize = match read_u64_le_at(payload, sh_base + 56) {
+            Some(v) => v as usize,
+            None => continue,
+        };
+        if sym_entsize < 24 || sym_size < sym_entsize {
+            continue;
+        }
+        let sym_end = match sym_off.checked_add(sym_size) {
+            Some(v) => v,
+            None => continue,
+        };
+        if sym_end > payload.len() {
+            continue;
+        }
+
+        let str_sh_base = match shoff.checked_add(strtab_index.saturating_mul(shentsize)) {
+            Some(v) => v,
+            None => continue,
+        };
+        if str_sh_base + 64 > payload.len() {
+            continue;
+        }
+        let str_off = match read_u64_le_at(payload, str_sh_base + 24) {
+            Some(v) => v as usize,
+            None => continue,
+        };
+        let str_size = match read_u64_le_at(payload, str_sh_base + 32) {
+            Some(v) => v as usize,
+            None => continue,
+        };
+        let str_end = match str_off.checked_add(str_size) {
+            Some(v) => v,
+            None => continue,
+        };
+        if str_end > payload.len() || str_size == 0 {
+            continue;
+        }
+        let strtab = &payload[str_off..str_end];
+        let count = sym_size / sym_entsize;
+        for i in 0..count {
+            let rec = sym_off + (i * sym_entsize);
+            if rec + 24 > payload.len() {
+                break;
+            }
+            let st_name = match read_u32_le_at(payload, rec) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+            let st_info = payload[rec + 4];
+            let st_shndx = match read_u16_le_at(payload, rec + 6) {
+                Some(v) => v,
+                None => continue,
+            };
+            let bind = st_info >> 4;
+            if st_shndx == SHN_UNDEF || bind == 0 || st_name == 0 || st_name >= strtab.len() {
+                continue;
+            }
+            let rel = &strtab[st_name..];
+            let end = rel.iter().position(|b| *b == 0).unwrap_or(rel.len());
+            if end == 0 {
+                continue;
+            }
+            let name = String::from_utf8_lossy(&rel[..end]).to_string();
+            if !name.is_empty() {
+                out.insert(fnv1a64(&name));
+            }
+        }
+    }
+
+    out
+}
+
+fn coff_member_defined_hashes(payload: &[u8]) -> HashSet<u64> {
+    let mut out = HashSet::new();
+    if payload.len() < 20 {
+        return out;
+    }
+    let machine = match read_u16_le_at(payload, 0) {
+        Some(v) => v,
+        None => return out,
+    };
+    if machine != 0x8664 {
+        return out;
+    }
+    let ptr_symtab = match read_u32_le_at(payload, 8) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    let symbol_count = match read_u32_le_at(payload, 12) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    if ptr_symtab == 0 || symbol_count == 0 {
+        return out;
+    }
+    let sym_end = match ptr_symtab.checked_add(symbol_count.saturating_mul(18)) {
+        Some(v) => v,
+        None => return out,
+    };
+    if sym_end > payload.len() {
+        return out;
+    }
+    let mut strtab: &[u8] = &[0, 0, 0, 0];
+    if sym_end + 4 <= payload.len() {
+        if let Some(str_size_u32) = read_u32_le_at(payload, sym_end) {
+            let str_size = str_size_u32 as usize;
+            let str_end = sym_end.saturating_add(str_size);
+            if str_size >= 4 && str_end <= payload.len() {
+                strtab = &payload[sym_end..str_end];
+            }
+        }
+    }
+
+    let mut raw_index = 0usize;
+    while raw_index < symbol_count {
+        let sym_off = ptr_symtab + (raw_index * 18);
+        if sym_off + 18 > payload.len() {
+            break;
+        }
+        let section_number = read_i16_le_at(payload, sym_off + 12).unwrap_or(0);
+        let storage_class = payload[sym_off + 16];
+        let aux_count = payload[sym_off + 17] as usize;
+        if section_number > 0
+            && (storage_class == STORAGE_CLASS_EXTERNAL
+                || storage_class == STORAGE_CLASS_WEAK_EXTERNAL)
+        {
+            let name_raw = &payload[sym_off..sym_off + 8];
+            let name = read_coff_name(name_raw, strtab);
+            if !name.is_empty() {
+                out.insert(fnv1a64(&name));
+            }
+        }
+        raw_index = raw_index.saturating_add(1 + aux_count);
+    }
+
+    out
+}
+
+fn macho_member_defined_hashes(payload: &[u8]) -> HashSet<u64> {
+    let mut out = HashSet::new();
+    if payload.len() < 32 {
+        return out;
+    }
+    let magic = match read_u32_le_at(payload, 0) {
+        Some(v) => v,
+        None => return out,
+    };
+    if magic != 0xfeedfacf && magic != 0xcffaedfe {
+        return out;
+    }
+    let cpu_type = match read_u32_le_at(payload, 4) {
+        Some(v) => v,
+        None => return out,
+    };
+    if cpu_type != 0x0100_0007 {
+        return out;
+    }
+    let ncmds = match read_u32_le_at(payload, 16) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    let sizeofcmds = match read_u32_le_at(payload, 20) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    if 32usize.saturating_add(sizeofcmds) > payload.len() {
+        return out;
+    }
+
+    let mut symoff = 0usize;
+    let mut nsyms = 0usize;
+    let mut stroff = 0usize;
+    let mut strsize = 0usize;
+    let mut cursor = 32usize;
+    for _ in 0..ncmds {
+        if cursor + 8 > payload.len() {
+            return out;
+        }
+        let cmd = match read_u32_le_at(payload, cursor) {
+            Some(v) => v,
+            None => return out,
+        };
+        let cmdsize = match read_u32_le_at(payload, cursor + 4) {
+            Some(v) => v as usize,
+            None => return out,
+        };
+        if cmdsize < 8 || cursor + cmdsize > payload.len() {
+            return out;
+        }
+        if cmd == 0x2 {
+            symoff = read_u32_le_at(payload, cursor + 8).unwrap_or(0) as usize;
+            nsyms = read_u32_le_at(payload, cursor + 12).unwrap_or(0) as usize;
+            stroff = read_u32_le_at(payload, cursor + 16).unwrap_or(0) as usize;
+            strsize = read_u32_le_at(payload, cursor + 20).unwrap_or(0) as usize;
+        }
+        cursor = cursor.saturating_add(cmdsize);
+    }
+
+    if nsyms == 0 || strsize == 0 {
+        return out;
+    }
+    let sym_end = match symoff.checked_add(nsyms.saturating_mul(16)) {
+        Some(v) => v,
+        None => return out,
+    };
+    let str_end = match stroff.checked_add(strsize) {
+        Some(v) => v,
+        None => return out,
+    };
+    if sym_end > payload.len() || str_end > payload.len() {
+        return out;
+    }
+    let strtab = &payload[stroff..str_end];
+    for i in 0..nsyms {
+        let off = symoff + (i * 16);
+        if off + 16 > payload.len() {
+            break;
+        }
+        let strx = read_u32_le_at(payload, off).unwrap_or(0) as usize;
+        let n_type = payload[off + 4];
+        let n_type_kind = n_type & 0x0e;
+        let is_external = (n_type & 0x01) != 0;
+        if !is_external || n_type_kind == 0x00 || strx >= strtab.len() {
+            continue;
+        }
+        let rel = &strtab[strx..];
+        let end = rel.iter().position(|b| *b == 0).unwrap_or(rel.len());
+        if end == 0 {
+            continue;
+        }
+        let name = String::from_utf8_lossy(&rel[..end]).to_string();
+        if !name.is_empty() {
+            out.insert(fnv1a64(&name));
+        }
+    }
+    out
+}
+
+fn archive_member_defined_symbol_hashes(payload: &[u8]) -> HashSet<u64> {
+    match probe_object_format_bytes(payload) {
+        OBJECT_FORMAT_ELF64 => elf_member_defined_hashes(payload),
+        OBJECT_FORMAT_COFF64 => coff_member_defined_hashes(payload),
+        OBJECT_FORMAT_MACHO64 => macho_member_defined_hashes(payload),
+        _ => HashSet::new(),
+    }
+}
+
+fn archive_member_matches_unresolved_state(state: &LinkerState, path: &Path, index: u32) -> u32 {
+    let key = archive_member_key(path, index);
+    if state.loaded_archive_members.contains(&key) {
+        return 0;
+    }
+    let needed = unresolved_required_symbol_hashes(state);
+    if needed.is_empty() {
+        return 0;
+    }
+
+    let member = match archive_member_at(path, index as usize) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let raw = match fs::read(path) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    let end = member.data_offset.saturating_add(member.data_size);
+    if end > raw.len() || member.data_size == 0 {
+        return 0;
+    }
+    let payload = &raw[member.data_offset..end];
+    let defined = archive_member_defined_symbol_hashes(payload);
+    for hash in defined {
+        if needed.contains(&hash) {
+            return 1;
+        }
+    }
+    0
 }
 
 fn build_section_runtime_address(state: &LinkerState, object_index: u32, section_index: u32) -> u64 {
@@ -569,14 +951,43 @@ fn write_minimal_elf_exec(
     image_payload: &[u8],
     build_id: &[u8],
     execstack: bool,
+    et_type: u16,
+    interp_path: Option<&str>,
 ) -> u32 {
-    let segment_offset = 0x1000usize;
+    let phoff = 64usize;
+    let mut phnum = 1usize;
+    let mut interp_bytes = Vec::new();
+    if let Some(path) = interp_path {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            interp_bytes.extend_from_slice(trimmed.as_bytes());
+            if interp_bytes.last().copied().unwrap_or(0) != 0 {
+                interp_bytes.push(0);
+            }
+            phnum = 2;
+        }
+    }
+    let phdr_end = phoff.saturating_add(phnum.saturating_mul(56));
+    let interp_offset = align_up(phdr_end as u64, 16) as usize;
+    let mut segment_offset = 0x1000usize;
+    if !interp_bytes.is_empty() {
+        let interp_end = interp_offset.saturating_add(interp_bytes.len());
+        if interp_end > segment_offset {
+            segment_offset = align_up(interp_end as u64, 0x1000) as usize;
+        }
+    }
     let payload = if image_payload.is_empty() {
         vec![0u8; 1]
     } else {
         image_payload.to_vec()
     };
-    let total_size = segment_offset.saturating_add(payload.len());
+    let mut total_size = segment_offset.saturating_add(payload.len());
+    if !interp_bytes.is_empty() {
+        let interp_end = interp_offset.saturating_add(interp_bytes.len());
+        if interp_end > total_size {
+            total_size = interp_end;
+        }
+    }
     let mut out = vec![0u8; total_size];
 
     // ELF header.
@@ -587,7 +998,7 @@ fn write_minimal_elf_exec(
     out[4] = 2; // 64-bit
     out[5] = 1; // little-endian
     out[6] = 1; // version
-    write_u16_le(&mut out, 16, ET_EXEC);
+    write_u16_le(&mut out, 16, et_type);
     write_u16_le(&mut out, 18, EM_X86_64);
     write_u32_le(&mut out, 20, EV_CURRENT);
     write_u64_le(
@@ -600,22 +1011,35 @@ fn write_minimal_elf_exec(
     write_u32_le(&mut out, 48, 0); // flags
     write_u16_le(&mut out, 52, 64); // ehsize
     write_u16_le(&mut out, 54, 56); // phentsize
-    write_u16_le(&mut out, 56, 1); // phnum
+    write_u16_le(&mut out, 56, phnum as u16); // phnum
     write_u16_le(&mut out, 58, 0); // shentsize
     write_u16_le(&mut out, 60, 0); // shnum
     write_u16_le(&mut out, 62, 0); // shstrndx
 
+    if !interp_bytes.is_empty() {
+        // PT_INTERP program header.
+        write_u32_le(&mut out, phoff, PT_INTERP);
+        write_u32_le(&mut out, phoff + 4, 0x4);
+        write_u64_le(&mut out, phoff + 8, interp_offset as u64);
+        write_u64_le(&mut out, phoff + 16, image_base.saturating_add(interp_offset as u64));
+        write_u64_le(&mut out, phoff + 24, image_base.saturating_add(interp_offset as u64));
+        write_u64_le(&mut out, phoff + 32, interp_bytes.len() as u64);
+        write_u64_le(&mut out, phoff + 40, interp_bytes.len() as u64);
+        write_u64_le(&mut out, phoff + 48, 1);
+        out[interp_offset..interp_offset + interp_bytes.len()].copy_from_slice(&interp_bytes);
+    }
+
     // PT_LOAD program header.
-    let phoff = 64usize;
-    write_u32_le(&mut out, phoff + 0, PT_LOAD);
+    let load_phoff = if interp_bytes.is_empty() { phoff } else { phoff + 56 };
+    write_u32_le(&mut out, load_phoff, PT_LOAD);
     let segment_flags = if execstack { 0x7 } else { 0x5 };
-    write_u32_le(&mut out, phoff + 4, segment_flags);
-    write_u64_le(&mut out, phoff + 8, segment_offset as u64);
-    write_u64_le(&mut out, phoff + 16, image_base);
-    write_u64_le(&mut out, phoff + 24, image_base);
-    write_u64_le(&mut out, phoff + 32, payload.len() as u64);
-    write_u64_le(&mut out, phoff + 40, payload.len() as u64);
-    write_u64_le(&mut out, phoff + 48, 0x1000);
+    write_u32_le(&mut out, load_phoff + 4, segment_flags);
+    write_u64_le(&mut out, load_phoff + 8, segment_offset as u64);
+    write_u64_le(&mut out, load_phoff + 16, image_base);
+    write_u64_le(&mut out, load_phoff + 24, image_base);
+    write_u64_le(&mut out, load_phoff + 32, payload.len() as u64);
+    write_u64_le(&mut out, load_phoff + 40, payload.len() as u64);
+    write_u64_le(&mut out, load_phoff + 48, 0x1000);
 
     out[segment_offset..segment_offset + payload.len()].copy_from_slice(&payload);
     append_build_id_note(&mut out, build_id);
@@ -972,6 +1396,10 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     state.target = TARGET_X86_64_NONE;
     state.entry = 0x0010_0000;
     state.image_base = 0x0001_0000;
+    state.link_as_needed = false;
+    state.link_pie = false;
+    state.link_shared = false;
+    state.link_static = false;
 }
 
 fn probe_object_format_bytes(raw: &[u8]) -> u32 {
@@ -2077,6 +2505,46 @@ pub extern "C" fn host_archive_member_object_kind(path: u64, index: u32) -> u32 
 }
 
 #[no_mangle]
+pub extern "C" fn host_archive_member_matches_unresolved(path: u64, index: u32) -> u32 {
+    let p = match to_path(path) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let state = linker().lock().expect("linker mutex poisoned");
+    archive_member_matches_unresolved_state(&state, &p, index)
+}
+
+#[no_mangle]
+pub extern "C" fn host_archive_member_is_loaded(path: u64, index: u32) -> u32 {
+    let p = match to_path(path) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let key = archive_member_key(&p, index);
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.loaded_archive_members.contains(&key) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn host_archive_member_mark_loaded(path: u64, index: u32) -> u32 {
+    let p = match to_path(path) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let key = archive_member_key(&p, index);
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    if state.loaded_archive_members.insert(key) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn host_archive_extract_member_object(path: u64, index: u32) -> u64 {
     let p = match to_path(path) {
         Some(v) => v,
@@ -2388,6 +2856,26 @@ pub extern "C" fn host_linker_register_archive(path: u64) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_group_push_start() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let archive_count = state.archives.len() as u32;
+    state.group_archive_starts.push(archive_count);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_group_pop_start() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.group_archive_starts.pop().unwrap_or(u32::MAX)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_group_depth() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.group_archive_starts.len() as u32
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_add_search_path(path: u64) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.search_paths.push(path);
@@ -2395,9 +2883,119 @@ pub extern "C" fn host_linker_add_search_path(path: u64) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_set_shared(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.link_shared = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_shared() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.link_shared { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_pie(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.link_pie = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_pie() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.link_pie { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_static(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.link_static = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_static() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.link_static { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_as_needed(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.link_as_needed = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_as_needed() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.link_as_needed { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_dynamic_linker(path: u64) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.dynamic_linker_path = path;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_dynamic_linker() -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.dynamic_linker_path
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_soname(name: u64) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.soname = name;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_soname() -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.soname
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_search_path_count() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
     state.search_paths.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_archive_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.archives.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_archive(index: u32) -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.archives.get(index as usize).copied().unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_archive_progress_reset() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.archive_progress = 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_archive_progress_add(delta: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.archive_progress = state.archive_progress.saturating_add(delta);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_archive_progress_get() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.archive_progress
 }
 
 #[no_mangle]
@@ -2971,18 +3569,44 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
     let image = build_flat_image_bytes(&state);
     let build_id = build_id_payload(&state, &image);
     let execstack = state.z_execstack;
-    let entry = if state.pending_elf_entry != 0 {
+    let link_shared = state.link_shared;
+    let link_pie = state.link_pie;
+    let link_static = state.link_static;
+    let et_type = if link_shared || link_pie { ET_DYN } else { ET_EXEC };
+    let entry = if link_shared {
+        0
+    } else if state.pending_elf_entry != 0 {
         state.pending_elf_entry
     } else {
         state.entry
     };
     let image_base = if state.pending_elf_image_base != 0 {
         state.pending_elf_image_base
+    } else if et_type == ET_DYN {
+        state.image_base
     } else {
         state.image_base.max(0x0010_0000)
     };
+    let dynamic_linker = if link_static || link_shared {
+        None
+    } else if state.dynamic_linker_path != 0 {
+        read_c_string(state.dynamic_linker_path)
+    } else if state.target == TARGET_X86_64_LINUX || state.target == TARGET_X86_64_NONE {
+        Some("/lib64/ld-linux-x86-64.so.2".to_string())
+    } else {
+        None
+    };
     drop(state);
-    write_minimal_elf_exec(&path, entry, image_base, &image, &build_id, execstack)
+    write_minimal_elf_exec(
+        &path,
+        entry,
+        image_base,
+        &image,
+        &build_id,
+        execstack,
+        et_type,
+        dynamic_linker.as_deref(),
+    )
 }
 
 #[no_mangle]
