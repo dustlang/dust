@@ -47,6 +47,11 @@ const FORMAT_MBR: u32 = 3;
 const FORMAT_PE64: u32 = 4;
 const FORMAT_MACHO64: u32 = 5;
 
+const TARGET_X86_64_NONE: u32 = 0;
+const TARGET_X86_64_LINUX: u32 = 1;
+const TARGET_X86_64_WINDOWS: u32 = 2;
+const TARGET_X86_64_MACOS: u32 = 3;
+
 const OBJECT_FORMAT_UNKNOWN: u32 = 0;
 const OBJECT_FORMAT_ELF64: u32 = 1;
 const OBJECT_FORMAT_COFF64: u32 = 2;
@@ -134,6 +139,7 @@ struct LinkerState {
     current_object: Option<ObjectRecord>,
     objects: Vec<ObjectRecord>,
     globals: HashMap<u64, GlobalSymbol>,
+    required_symbols: Vec<u64>,
     output_sections: Vec<u64>,
     image_size: u32,
     active_patch_object: Option<u32>,
@@ -158,7 +164,11 @@ fn args() -> &'static Mutex<Vec<CString>> {
 }
 
 fn linker() -> &'static Mutex<LinkerState> {
-    LINKER.get_or_init(|| Mutex::new(LinkerState::default()))
+    LINKER.get_or_init(|| {
+        let mut state = LinkerState::default();
+        reset_linker_state_defaults(&mut state);
+        Mutex::new(state)
+    })
 }
 
 fn intern_string<S: AsRef<str>>(value: S) -> u64 {
@@ -687,6 +697,86 @@ fn parse_defsym_spec(text: &str) -> Option<(u64, u64)> {
     }
     let value = parse_u64_auto(value_raw.trim())?;
     Some((fnv1a64(name), value))
+}
+
+fn parse_defsym_or_symbol_rhs(state: &LinkerState, text: &str) -> Option<(u64, u64)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (name_raw, value_raw) = trimmed.split_once('=')?;
+    let name = name_raw.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let rhs = value_raw.trim();
+    let value = if let Some(parsed) = parse_u64_auto(rhs) {
+        parsed
+    } else {
+        let hash = fnv1a64(rhs);
+        state
+            .globals
+            .get(&hash)
+            .filter(|g| g.defined == 1)
+            .map(|g| g.address)?
+    };
+    Some((fnv1a64(name), value))
+}
+
+fn tokenize_script_args(value: &str) -> Vec<String> {
+    value
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .map(trim_quotes)
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string())
+        .collect()
+}
+
+fn parse_target_value(raw: &str) -> Option<u32> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "x86_64-linux" | "x86_64-linux-gnu" | "x86_64-unknown-linux-gnu" | "elf_x86_64"
+        | "elf64-x86-64" => Some(TARGET_X86_64_LINUX),
+        "x86_64-windows-msvc"
+        | "x86_64-pc-windows-msvc"
+        | "x86_64-windows-gnu"
+        | "i386pep"
+        | "pep"
+        | "pe-x86-64" => Some(TARGET_X86_64_WINDOWS),
+        "x86_64-apple-darwin" | "x86_64-macos" | "mach_o_x86_64" | "macho-x86-64" => {
+            Some(TARGET_X86_64_MACOS)
+        }
+        "x86_64-none" => Some(TARGET_X86_64_NONE),
+        _ => None,
+    }
+}
+
+fn resolve_script_path(base_dir: &Path, raw: &str) -> PathBuf {
+    let token = trim_quotes(raw).trim();
+    let p = PathBuf::from(token);
+    if p.is_absolute() {
+        p
+    } else {
+        base_dir.join(p)
+    }
+}
+
+fn require_symbol_hash(state: &mut LinkerState, hash: u64) {
+    if hash == 0 {
+        return;
+    }
+    if !state.required_symbols.contains(&hash) {
+        state.required_symbols.push(hash);
+    }
+}
+
+fn reset_linker_state_defaults(state: &mut LinkerState) {
+    *state = LinkerState::default();
+    state.output_path = DEFAULT_OUTPUT_HANDLE;
+    state.output_format = FORMAT_ELF64;
+    state.target = TARGET_X86_64_NONE;
+    state.entry = 0x0010_0000;
+    state.image_base = 0x0001_0000;
 }
 
 fn probe_object_format_bytes(raw: &[u8]) -> u32 {
@@ -1349,7 +1439,27 @@ fn extract_directive_arg(statement: &str, directive: &str) -> Option<String> {
     Some(trim_quotes(inner).to_string())
 }
 
-fn apply_linker_script_statement(state: &mut LinkerState, statement: &str) {
+fn set_output_format_from_text(state: &mut LinkerState, raw: &str) {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.contains("elf") {
+        state.output_format = FORMAT_ELF64;
+    } else if normalized.contains("pe") || normalized.contains("pei") {
+        state.output_format = FORMAT_PE64;
+    } else if normalized.contains("mach") {
+        state.output_format = FORMAT_MACHO64;
+    } else if normalized.contains("binary") || normalized == "bin" {
+        state.output_format = FORMAT_BINARY;
+    } else if normalized.contains("mbr") {
+        state.output_format = FORMAT_MBR;
+    }
+}
+
+fn apply_linker_script_statement(
+    state: &mut LinkerState,
+    statement: &str,
+    script_dir: &Path,
+    depth: u32,
+) -> u32 {
     if let Some(arg) = extract_directive_arg(statement, "ENTRY") {
         if let Some(v) = parse_u64_auto(&arg) {
             state.entry = v;
@@ -1359,42 +1469,128 @@ fn apply_linker_script_statement(state: &mut LinkerState, statement: &str) {
                 state.entry = global.address;
             }
         }
-        return;
+        return ERR_OK;
     }
 
     if let Some(arg) = extract_directive_arg(statement, "OUTPUT_FORMAT") {
-        let normalized = arg.trim().to_ascii_lowercase();
-        if normalized.contains("elf") {
-            state.output_format = FORMAT_ELF64;
-        } else if normalized.contains("pe") || normalized.contains("pei") {
-            state.output_format = FORMAT_PE64;
-        } else if normalized.contains("mach") {
-            state.output_format = FORMAT_MACHO64;
-        } else if normalized.contains("binary") || normalized == "bin" {
-            state.output_format = FORMAT_BINARY;
+        set_output_format_from_text(state, &arg);
+        return ERR_OK;
+    }
+
+    if let Some(arg) = extract_directive_arg(statement, "OUTPUT") {
+        if !arg.is_empty() {
+            let output_path = resolve_script_path(script_dir, &arg);
+            state.output_path = intern_string(output_path.to_string_lossy().to_string());
         }
-        return;
+        return ERR_OK;
+    }
+
+    if let Some(arg) = extract_directive_arg(statement, "TARGET") {
+        if let Some(target) = parse_target_value(&arg) {
+            state.target = target;
+        }
+        return ERR_OK;
     }
 
     if let Some(arg) = extract_directive_arg(statement, "SEARCH_DIR") {
         if !arg.is_empty() {
-            let handle = intern_string(arg);
+            let path = resolve_script_path(script_dir, &arg);
+            let handle = intern_string(path.to_string_lossy().to_string());
             state.search_paths.push(handle);
         }
-        return;
+        return ERR_OK;
+    }
+
+    if let Some(arg) = extract_directive_arg(statement, "EXTERN") {
+        for token in tokenize_script_args(&arg) {
+            require_symbol_hash(state, fnv1a64(&token));
+        }
+        return ERR_OK;
+    }
+
+    if let Some(arg) = extract_directive_arg(statement, "PROVIDE_HIDDEN")
+        .or_else(|| extract_directive_arg(statement, "PROVIDE"))
+    {
+        if let Some((name_hash, value)) = parse_defsym_or_symbol_rhs(state, &arg) {
+            let already_defined = state
+                .globals
+                .get(&name_hash)
+                .map(|g| g.defined == 1)
+                .unwrap_or(false);
+            if !already_defined {
+                state.globals.insert(
+                    name_hash,
+                    GlobalSymbol {
+                        object_index: 0,
+                        symbol_index: 0,
+                        bind: 1,
+                        defined: 1,
+                        address: value,
+                    },
+                );
+            }
+        }
+        return ERR_OK;
     }
 
     if let Some(arg) = extract_directive_arg(statement, "INPUT")
         .or_else(|| extract_directive_arg(statement, "GROUP"))
     {
-        for token in arg
-            .split(|c: char| c.is_ascii_whitespace() || c == ',')
-            .map(trim_quotes)
-            .filter(|t| !t.is_empty())
-        {
-            state.inputs.push(intern_string(token));
+        for token in tokenize_script_args(&arg) {
+            let path = resolve_script_path(script_dir, &token);
+            state
+                .inputs
+                .push(intern_string(path.to_string_lossy().to_string()));
+        }
+        return ERR_OK;
+    }
+
+    if let Some(arg) = extract_directive_arg(statement, "INCLUDE") {
+        if depth >= 32 {
+            return ERR_INVALID_FORMAT;
+        }
+        let include_path = resolve_script_path(script_dir, &arg);
+        return apply_linker_script_file(state, &include_path, depth + 1);
+    }
+
+    ERR_OK
+}
+
+fn apply_linker_script_file(state: &mut LinkerState, path: &Path, depth: u32) -> u32 {
+    if !path.exists() || !path.is_file() {
+        return ERR_FILE_NOT_FOUND;
+    }
+    let raw = match fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => return ERR_FILE_NOT_FOUND,
+    };
+
+    let mut cleaned = String::new();
+    for mut line in raw.lines().map(|l| l.to_string()) {
+        if let Some(idx) = line.find("//") {
+            line.truncate(idx);
+        }
+        if let Some(idx) = line.find('#') {
+            line.truncate(idx);
+        }
+        if !line.trim().is_empty() {
+            cleaned.push_str(line.trim());
+            cleaned.push('\n');
         }
     }
+
+    let script_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    for statement in cleaned.split(';').flat_map(|s| s.split('\n')) {
+        let stmt = statement.trim();
+        if stmt.is_empty() {
+            continue;
+        }
+        let status = apply_linker_script_statement(state, stmt, script_dir, depth);
+        if status != ERR_OK {
+            return status;
+        }
+    }
+    ERR_OK
 }
 
 fn fnv1a64(text: &str) -> u64 {
@@ -1841,6 +2037,51 @@ pub extern "C" fn host_linker_apply_defsym(spec: u64) -> u32 {
             address: value,
         },
     );
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_require_symbol(name: u64) -> u32 {
+    let text = match read_c_string(name) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return ERR_INVALID_FORMAT;
+    }
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    require_symbol_hash(&mut state, fnv1a64(trimmed));
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_check_required_symbols() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let required_list = state.required_symbols.clone();
+    for required in &required_list {
+        let defined = state
+            .globals
+            .get(required)
+            .map(|g| g.defined == 1)
+            .unwrap_or(false);
+        if !defined {
+            return set_last_error(&mut state, ERR_UNDEFINED_SYMBOL);
+        }
+    }
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_required_symbol_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.required_symbols.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_reset_state() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    reset_linker_state_defaults(&mut state);
     set_last_error(&mut state, ERR_OK)
 }
 
@@ -2603,35 +2844,10 @@ pub extern "C" fn host_linker_apply_script(script: u64) -> u32 {
         Some(v) => v,
         None => return ERR_FILE_NOT_FOUND,
     };
-    if !p.exists() || !p.is_file() {
-        return ERR_FILE_NOT_FOUND;
-    }
-    let raw = match fs::read_to_string(&p) {
-        Ok(v) => v,
-        Err(_) => return ERR_FILE_NOT_FOUND,
-    };
-
-    let mut cleaned = String::new();
-    for mut line in raw.lines().map(|l| l.to_string()) {
-        if let Some(idx) = line.find("//") {
-            line.truncate(idx);
-        }
-        if let Some(idx) = line.find('#') {
-            line.truncate(idx);
-        }
-        if !line.trim().is_empty() {
-            cleaned.push_str(line.trim());
-            cleaned.push('\n');
-        }
-    }
-
     let mut state = linker().lock().expect("linker mutex poisoned");
-    for statement in cleaned.split(';').flat_map(|s| s.split('\n')) {
-        let stmt = statement.trim();
-        if stmt.is_empty() {
-            continue;
-        }
-        apply_linker_script_statement(&mut state, stmt);
+    let status = apply_linker_script_file(&mut state, &p, 0);
+    if status != ERR_OK {
+        return set_last_error(&mut state, status);
     }
     set_last_error(&mut state, ERR_OK)
 }
