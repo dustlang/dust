@@ -49,6 +49,9 @@ This bootstrap exception prevents recursive self-linking while producing `dustli
 - linker state accessors for object/symbol/relocation operations
 - output writers for ELF/flat/MBR/PE/Mach-O image paths
 - linker script apply hook used by `-T/--script`
+- shared-object symbol ingestion across ELF, PE, COFF, and Mach-O paths
+- block-aware linker-script statement splitting for multi-line `MEMORY`/`SECTIONS` scripts
+- script semantics for `SECTIONS` output-address parse and `ENTRY(symbol)` required-symbol registration
 
 ## Object Path
 

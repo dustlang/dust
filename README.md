@@ -20,6 +20,11 @@ This repository contains:
 - Host executable builds prefer `dustlink` as the linker frontend.
 - To bootstrap `dustlink` itself, the compiler bypasses `dustlink` and falls back to `lld` paths (`-fuse-ld=lld`, `rust-lld`, `ld.lld`) before the driver default linker.
 - `dust kernel-link` remains available but is deprecated; use `dust obj` + `dustlink`.
+- Host linker runtime support used by Dust-built tools now includes:
+  - cross-format shared-symbol ingestion (ELF/PE/COFF/Mach-O paths)
+  - block-aware linker-script statement splitting
+  - section output-address parsing inside `SECTIONS { ... }`
+  - required-symbol registration for `ENTRY(symbol)` script form
 
 ### What Works Today (v0.2)
 

@@ -18,6 +18,8 @@
 - bootstrap guard for building `dustlink` avoids recursive self-link
 - kernel workflows are documented around `obj` + `dustlink` with `kernel-link` as compatibility mode
 - host runtime shim grew linker-oriented intrinsics used by Dust-built `dustlink`
+- host runtime shim shared-symbol ingestion now includes ELF, PE, COFF, and Mach-O metadata paths
+- linker-script application now uses block-aware statement splitting and additional `SECTIONS`/`ENTRY(symbol)` semantics used by dustlink parity work
 
 ## Important Mismatches to Track
 

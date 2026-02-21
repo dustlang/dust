@@ -1687,6 +1687,136 @@ fn parse_sections_location_assignment(statement: &str) -> Option<u64> {
     None
 }
 
+fn parse_sections_output_address(statement: &str) -> Option<u64> {
+    let t = statement.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let bytes = t.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] == b'.' {
+            let mut cursor = idx + 1;
+            while cursor < bytes.len() {
+                let ch = bytes[cursor];
+                if ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'.' {
+                    cursor += 1;
+                } else {
+                    break;
+                }
+            }
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b'=' {
+                idx += 1;
+                continue;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b':' {
+                idx += 1;
+                continue;
+            }
+
+            let tail = t[cursor..].trim_start();
+            let before_colon = tail.split(':').next().unwrap_or("").trim();
+            if !before_colon.is_empty() {
+                let token = before_colon.split_whitespace().next().unwrap_or("").trim();
+                if let Some(value) = parse_u64_scaled(token) {
+                    return Some(value);
+                }
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn split_script_statements(cleaned: &str) -> Vec<String> {
+    let mut statements: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut brace_depth = 0u32;
+    let mut paren_depth = 0u32;
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut escape = false;
+
+    for ch in cleaned.chars() {
+        if in_string {
+            current.push(ch);
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == quote {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' || ch == '\'' {
+            in_string = true;
+            quote = ch;
+            current.push(ch);
+            continue;
+        }
+
+        if ch == '{' {
+            brace_depth = brace_depth.saturating_add(1);
+            current.push(ch);
+            continue;
+        }
+        if ch == '}' {
+            brace_depth = brace_depth.saturating_sub(1);
+            current.push(ch);
+            continue;
+        }
+        if ch == '(' {
+            paren_depth = paren_depth.saturating_add(1);
+            current.push(ch);
+            continue;
+        }
+        if ch == ')' {
+            paren_depth = paren_depth.saturating_sub(1);
+            current.push(ch);
+            continue;
+        }
+
+        if ch == ';' {
+            if brace_depth == 0 && paren_depth == 0 {
+                let stmt = current.trim();
+                if !stmt.is_empty() {
+                    statements.push(stmt.to_string());
+                }
+                current.clear();
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if ch == '\n' && brace_depth == 0 && paren_depth == 0 {
+            let stmt = current.trim();
+            if !stmt.is_empty() {
+                statements.push(stmt.to_string());
+            }
+            current.clear();
+            continue;
+        }
+
+        current.push(ch);
+    }
+
+    let tail = current.trim();
+    if !tail.is_empty() {
+        statements.push(tail.to_string());
+    }
+    statements
+}
+
 fn parse_build_id_mode_and_bytes(raw: &str) -> Option<(u32, Vec<u8>)> {
     let normalized = raw.trim().to_ascii_lowercase();
     if normalized.is_empty() || normalized == "fast" {
@@ -1859,6 +1989,78 @@ fn dynstr_symbol_name(raw: &[u8], dynstr_off: usize, dynstr_size: usize, st_name
     Some(String::from_utf8_lossy(&raw[start..end]).to_string())
 }
 
+fn add_shared_global_symbol(state: &mut LinkerState, name: &str) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let name_hash = fnv1a64(trimmed);
+    let should_insert = match state.globals.get(&name_hash) {
+        Some(existing) if existing.defined == 1 && existing.bind == 1 => false,
+        _ => true,
+    };
+    if should_insert {
+        state.globals.insert(
+            name_hash,
+            GlobalSymbol {
+                object_index: 0,
+                symbol_index: 0,
+                bind: 2,
+                defined: 1,
+                address: 0,
+            },
+        );
+    }
+}
+
+fn read_c_string_from_bytes(raw: &[u8], start: usize) -> Option<String> {
+    if start >= raw.len() {
+        return None;
+    }
+    let mut end = start;
+    while end < raw.len() {
+        if raw[end] == 0 {
+            break;
+        }
+        end += 1;
+    }
+    if end <= start {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&raw[start..end]).to_string())
+}
+
+fn pe_rva_to_file_offset(raw: &[u8], section_table_off: usize, section_count: usize, rva: u32) -> Option<usize> {
+    for i in 0..section_count {
+        let sec_off = section_table_off.checked_add(i.saturating_mul(40))?;
+        if sec_off + 40 > raw.len() {
+            return None;
+        }
+        let virtual_size = read_u32_le_at(raw, sec_off + 8)?;
+        let virtual_address = read_u32_le_at(raw, sec_off + 12)?;
+        let size_of_raw_data = read_u32_le_at(raw, sec_off + 16)?;
+        let pointer_to_raw_data = read_u32_le_at(raw, sec_off + 20)?;
+        let span = if virtual_size > size_of_raw_data {
+            virtual_size
+        } else {
+            size_of_raw_data
+        };
+        if span == 0 {
+            continue;
+        }
+        if rva >= virtual_address {
+            let delta = rva - virtual_address;
+            if delta < span {
+                let file_off = (pointer_to_raw_data as usize).checked_add(delta as usize)?;
+                if file_off < raw.len() {
+                    return Some(file_off);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn ingest_shared_elf_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
     if raw.len() < 64 || &raw[0..4] != b"\x7fELF" {
         return ERR_INVALID_FORMAT;
@@ -1967,22 +2169,307 @@ fn ingest_shared_elf_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
             Some(v) if !v.is_empty() => v,
             _ => continue,
         };
-        let name_hash = fnv1a64(&name);
-        let should_insert = match state.globals.get(&name_hash) {
-            Some(existing) if existing.defined == 1 && existing.bind == 1 => false,
-            _ => true,
+        add_shared_global_symbol(state, &name);
+    }
+
+    ERR_OK
+}
+
+fn ingest_shared_pe_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
+    if raw.len() < 0x40 || raw.get(0).copied() != Some(b'M') || raw.get(1).copied() != Some(b'Z') {
+        return ERR_INVALID_FORMAT;
+    }
+    let pe_offset = match read_u32_le_at(raw, 0x3c) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if pe_offset + 24 > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+    if &raw[pe_offset..pe_offset + 4] != b"PE\0\0" {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let coff_off = pe_offset + 4;
+    let section_count = match read_u16_le_at(raw, coff_off + 2) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let optional_size = match read_u16_le_at(raw, coff_off + 16) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let optional_off = coff_off + 20;
+    if optional_off + optional_size > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let magic = match read_u16_le_at(raw, optional_off) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let data_dir_base = if magic == 0x20b {
+        optional_off + 112
+    } else if magic == 0x10b {
+        optional_off + 96
+    } else {
+        return ERR_INVALID_FORMAT;
+    };
+    if data_dir_base + 8 > optional_off + optional_size {
+        return ERR_OK;
+    }
+
+    let export_rva = match read_u32_le_at(raw, data_dir_base) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if export_rva == 0 {
+        return ERR_OK;
+    }
+    let section_table_off = optional_off + optional_size;
+    if section_table_off + section_count.saturating_mul(40) > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let export_dir_off = match pe_rva_to_file_offset(raw, section_table_off, section_count, export_rva) {
+        Some(v) => v,
+        None => return ERR_OK,
+    };
+    if export_dir_off + 40 > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let number_of_names = match read_u32_le_at(raw, export_dir_off + 24) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let address_of_names_rva = match read_u32_le_at(raw, export_dir_off + 32) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if number_of_names == 0 || address_of_names_rva == 0 {
+        return ERR_OK;
+    }
+
+    let names_table_off = match pe_rva_to_file_offset(raw, section_table_off, section_count, address_of_names_rva) {
+        Some(v) => v,
+        None => return ERR_OK,
+    };
+    for i in 0..number_of_names {
+        let entry_off = match names_table_off.checked_add(i.saturating_mul(4)) {
+            Some(v) => v,
+            None => return ERR_INVALID_FORMAT,
         };
-        if should_insert {
-            state.globals.insert(
-                name_hash,
-                GlobalSymbol {
-                    object_index: 0,
-                    symbol_index: 0,
-                    bind: 2,
-                    defined: 1,
-                    address: 0,
-                },
-            );
+        if entry_off + 4 > raw.len() {
+            return ERR_INVALID_FORMAT;
+        }
+        let name_rva = match read_u32_le_at(raw, entry_off) {
+            Some(v) if v != 0 => v,
+            _ => continue,
+        };
+        let name_off = match pe_rva_to_file_offset(raw, section_table_off, section_count, name_rva) {
+            Some(v) => v,
+            None => continue,
+        };
+        if let Some(name) = read_c_string_from_bytes(raw, name_off) {
+            add_shared_global_symbol(state, &name);
+        }
+    }
+
+    ERR_OK
+}
+
+fn ingest_shared_coff_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
+    if raw.len() < 20 {
+        return ERR_INVALID_FORMAT;
+    }
+    let machine = match read_u16_le_at(raw, 0) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if machine != 0x8664 {
+        return ERR_UNSUPPORTED_TARGET;
+    }
+    let ptr_symtab = match read_u32_le_at(raw, 8) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let symbol_count_raw = match read_u32_le_at(raw, 12) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if ptr_symtab == 0 || symbol_count_raw == 0 {
+        return ERR_OK;
+    }
+
+    let sym_end = match ptr_symtab.checked_add(symbol_count_raw.saturating_mul(18)) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if sym_end > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let mut strtab: Vec<u8> = vec![0, 0, 0, 0];
+    if sym_end + 4 <= raw.len() {
+        let str_size = read_u32_le_at(raw, sym_end).unwrap_or(0) as usize;
+        if str_size >= 4 && sym_end + str_size <= raw.len() {
+            strtab = raw[sym_end..sym_end + str_size].to_vec();
+        }
+    }
+
+    let mut raw_index = 0usize;
+    while raw_index < symbol_count_raw {
+        let sym_off = ptr_symtab + (raw_index * 18);
+        if sym_off + 18 > raw.len() {
+            return ERR_INVALID_FORMAT;
+        }
+        let name_raw = &raw[sym_off..sym_off + 8];
+        let name = read_coff_name(name_raw, &strtab);
+        let section_number = read_i16_le_at(raw, sym_off + 12).unwrap_or(0);
+        let storage_class = raw[sym_off + 16];
+        let aux_count = raw[sym_off + 17] as usize;
+
+        let is_external =
+            storage_class == STORAGE_CLASS_EXTERNAL || storage_class == STORAGE_CLASS_WEAK_EXTERNAL;
+        if is_external && section_number > 0 {
+            add_shared_global_symbol(state, &name);
+        }
+
+        raw_index = raw_index.saturating_add(1 + aux_count);
+    }
+
+    ERR_OK
+}
+
+fn ingest_shared_macho_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
+    if raw.len() < 32 {
+        return ERR_INVALID_FORMAT;
+    }
+    let magic = match read_u32_le_at(raw, 0) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if magic != 0xfeedfacf && magic != 0xcffaedfe {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let cpu_type = match read_u32_le_at(raw, 4) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if cpu_type != 0x0100_0007 {
+        return ERR_UNSUPPORTED_TARGET;
+    }
+
+    let ncmds = match read_u32_le_at(raw, 16) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let sizeofcmds = match read_u32_le_at(raw, 20) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if 32usize.saturating_add(sizeofcmds) > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let mut symoff: usize = 0;
+    let mut nsyms: usize = 0;
+    let mut stroff: usize = 0;
+    let mut strsize: usize = 0;
+    let mut iextdefsym: Option<usize> = None;
+    let mut nextdefsym: Option<usize> = None;
+
+    let mut cursor = 32usize;
+    for _ in 0..ncmds {
+        if cursor + 8 > raw.len() {
+            return ERR_INVALID_FORMAT;
+        }
+        let cmd = match read_u32_le_at(raw, cursor) {
+            Some(v) => v,
+            None => return ERR_INVALID_FORMAT,
+        };
+        let cmdsize = match read_u32_le_at(raw, cursor + 4) {
+            Some(v) => v as usize,
+            None => return ERR_INVALID_FORMAT,
+        };
+        if cmdsize < 8 || cursor + cmdsize > raw.len() {
+            return ERR_INVALID_FORMAT;
+        }
+
+        if cmd == 0x2 {
+            symoff = match read_u32_le_at(raw, cursor + 8) {
+                Some(v) => v as usize,
+                None => return ERR_INVALID_FORMAT,
+            };
+            nsyms = match read_u32_le_at(raw, cursor + 12) {
+                Some(v) => v as usize,
+                None => return ERR_INVALID_FORMAT,
+            };
+            stroff = match read_u32_le_at(raw, cursor + 16) {
+                Some(v) => v as usize,
+                None => return ERR_INVALID_FORMAT,
+            };
+            strsize = match read_u32_le_at(raw, cursor + 20) {
+                Some(v) => v as usize,
+                None => return ERR_INVALID_FORMAT,
+            };
+        } else if cmd == 0xb {
+            iextdefsym = read_u32_le_at(raw, cursor + 16).map(|v| v as usize);
+            nextdefsym = read_u32_le_at(raw, cursor + 20).map(|v| v as usize);
+        }
+        cursor = cursor.saturating_add(cmdsize);
+    }
+
+    if nsyms == 0 || strsize < 1 {
+        return ERR_OK;
+    }
+    let sym_end = match symoff.checked_add(nsyms.saturating_mul(16)) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let str_end = match stroff.checked_add(strsize) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if sym_end > raw.len() || str_end > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+    let strtab = &raw[stroff..str_end];
+    let start_index = iextdefsym.unwrap_or(0).min(nsyms);
+    let end_index = if let Some(count) = nextdefsym {
+        start_index.saturating_add(count).min(nsyms)
+    } else {
+        nsyms
+    };
+
+    for i in start_index..end_index {
+        let off = symoff + (i * 16);
+        if off + 16 > raw.len() {
+            return ERR_INVALID_FORMAT;
+        }
+        let strx = match read_u32_le_at(raw, off) {
+            Some(v) => v as usize,
+            None => return ERR_INVALID_FORMAT,
+        };
+        let n_type = raw[off + 4];
+        let n_type_kind = n_type & 0x0e;
+        let is_external = (n_type & 0x01) != 0;
+        if !is_external || n_type_kind == 0x00 || strx >= strtab.len() {
+            continue;
+        }
+        let rel = &strtab[strx..];
+        let end = rel.iter().position(|b| *b == 0).unwrap_or(rel.len());
+        if end == 0 {
+            continue;
+        }
+        let name = String::from_utf8_lossy(&rel[..end]).to_string();
+        add_shared_global_symbol(state, &name);
+        if let Some(stripped) = name.strip_prefix('_') {
+            if !stripped.is_empty() {
+                add_shared_global_symbol(state, stripped);
+            }
         }
     }
 
@@ -1994,9 +2481,13 @@ fn ingest_shared_object_symbols(state: &mut LinkerState, path: &Path) -> u32 {
         Ok(v) => v,
         Err(_) => return ERR_FILE_NOT_FOUND,
     };
+    if raw.len() >= 2 && raw.get(0).copied() == Some(b'M') && raw.get(1).copied() == Some(b'Z') {
+        return ingest_shared_pe_symbols(state, &raw);
+    }
     match probe_object_format_bytes(&raw) {
         OBJECT_FORMAT_ELF64 => ingest_shared_elf_symbols(state, &raw),
-        OBJECT_FORMAT_COFF64 | OBJECT_FORMAT_MACHO64 => ERR_OK,
+        OBJECT_FORMAT_COFF64 => ingest_shared_coff_symbols(state, &raw),
+        OBJECT_FORMAT_MACHO64 => ingest_shared_macho_symbols(state, &raw),
         OBJECT_FORMAT_UNKNOWN => ERR_OK,
         _ => ERR_OK,
     }
@@ -2660,6 +3151,8 @@ fn apply_linker_script_statement(
             let hash = fnv1a64(&arg);
             if let Some(global) = state.globals.get(&hash) {
                 state.entry = global.address;
+            } else {
+                require_symbol_hash(state, hash);
             }
         }
         return ERR_OK;
@@ -2788,6 +3281,8 @@ fn apply_linker_script_statement(
     }
     if let Some(dot_addr) = parse_sections_location_assignment(statement) {
         state.image_base = dot_addr;
+    } else if let Some(section_addr) = parse_sections_output_address(statement) {
+        state.image_base = section_addr;
     }
 
     ERR_OK
@@ -2817,12 +3312,8 @@ fn apply_linker_script_file(state: &mut LinkerState, path: &Path, depth: u32) ->
     }
 
     let script_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    for statement in cleaned.split(';').flat_map(|s| s.split('\n')) {
-        let stmt = statement.trim();
-        if stmt.is_empty() {
-            continue;
-        }
-        let status = apply_linker_script_statement(state, stmt, script_dir, depth);
+    for stmt in split_script_statements(&cleaned) {
+        let status = apply_linker_script_statement(state, &stmt, script_dir, depth);
         if status != ERR_OK {
             return status;
         }
