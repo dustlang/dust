@@ -36,6 +36,7 @@ const SHF_WRITE: u64 = 0x1;
 const SHF_EXECINSTR: u64 = 0x4;
 const SHT_NOBITS: u32 = 8;
 const SHT_PROGBITS: u32 = 1;
+const SHT_DYNSYM: u32 = 11;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
@@ -180,6 +181,7 @@ struct LinkerState {
     link_pie: bool,
     link_static: bool,
     link_as_needed: bool,
+    no_undefined: bool,
     dynamic_linker_path: u64,
     soname: u64,
     needed_shared_libs: Vec<u64>,
@@ -1590,6 +1592,7 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     state.entry = 0x0010_0000;
     state.image_base = 0x0001_0000;
     state.link_as_needed = false;
+    state.no_undefined = false;
     state.link_pie = false;
     state.link_shared = false;
     state.link_static = false;
@@ -1623,6 +1626,172 @@ fn probe_object_format_path(path: &Path) -> u32 {
         Err(_) => return OBJECT_FORMAT_UNKNOWN,
     };
     probe_object_format_bytes(&raw)
+}
+
+fn dynstr_symbol_name(raw: &[u8], dynstr_off: usize, dynstr_size: usize, st_name: u32) -> Option<String> {
+    let name_off = st_name as usize;
+    if name_off >= dynstr_size {
+        return None;
+    }
+    let start = dynstr_off.checked_add(name_off)?;
+    let end_limit = dynstr_off.checked_add(dynstr_size)?;
+    if start >= raw.len() || start >= end_limit {
+        return None;
+    }
+    let mut end = start;
+    while end < end_limit && end < raw.len() {
+        if raw[end] == 0 {
+            break;
+        }
+        end += 1;
+    }
+    if end <= start {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&raw[start..end]).to_string())
+}
+
+fn ingest_shared_elf_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
+    if raw.len() < 64 || &raw[0..4] != b"\x7fELF" {
+        return ERR_INVALID_FORMAT;
+    }
+    if raw.get(4).copied().unwrap_or(0) != 2 || raw.get(5).copied().unwrap_or(0) != 1 {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let shoff = match read_u64_le_at(raw, 40) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let shentsize = match read_u16_le_at(raw, 58) {
+        Some(v) if v >= 64 => v as usize,
+        _ => return ERR_INVALID_FORMAT,
+    };
+    let shnum = match read_u16_le_at(raw, 60) {
+        Some(v) if v > 0 => v as usize,
+        _ => return ERR_INVALID_FORMAT,
+    };
+
+    let mut dynsym_index: Option<usize> = None;
+    for index in 0..shnum {
+        let base = match shoff.checked_add(index.saturating_mul(shentsize)) {
+            Some(v) => v,
+            None => return ERR_INVALID_FORMAT,
+        };
+        let sh_type = match read_u32_le_at(raw, base + 4) {
+            Some(v) => v,
+            None => return ERR_INVALID_FORMAT,
+        };
+        if sh_type == SHT_DYNSYM {
+            dynsym_index = Some(index);
+            break;
+        }
+    }
+
+    let dynsym_index = match dynsym_index {
+        Some(v) => v,
+        None => return ERR_OK,
+    };
+    let dynsym_base = match shoff.checked_add(dynsym_index.saturating_mul(shentsize)) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let dynsym_off = match read_u64_le_at(raw, dynsym_base + 24) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let dynsym_size = match read_u64_le_at(raw, dynsym_base + 32) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let dynsym_link = match read_u32_le_at(raw, dynsym_base + 40) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let dynsym_entsize = match read_u64_le_at(raw, dynsym_base + 56) {
+        Some(v) if v >= 24 => v as usize,
+        _ => return ERR_INVALID_FORMAT,
+    };
+
+    if dynsym_off.saturating_add(dynsym_size) > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+    if dynsym_link >= shnum {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let dynstr_base = match shoff.checked_add(dynsym_link.saturating_mul(shentsize)) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let dynstr_off = match read_u64_le_at(raw, dynstr_base + 24) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let dynstr_size = match read_u64_le_at(raw, dynstr_base + 32) {
+        Some(v) => v as usize,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if dynstr_off.saturating_add(dynstr_size) > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+
+    let symbol_count = dynsym_size / dynsym_entsize;
+    for index in 0..symbol_count {
+        let sym_off = dynsym_off + index.saturating_mul(dynsym_entsize);
+        let st_name = match read_u32_le_at(raw, sym_off) {
+            Some(v) if v != 0 => v,
+            _ => continue,
+        };
+        let st_info = *raw.get(sym_off + 4).unwrap_or(&0);
+        let st_bind = st_info >> 4;
+        if st_bind != 1 && st_bind != 2 {
+            continue;
+        }
+        let st_shndx = match read_u16_le_at(raw, sym_off + 6) {
+            Some(v) => v,
+            None => continue,
+        };
+        if st_shndx == SHN_UNDEF {
+            continue;
+        }
+        let name = match dynstr_symbol_name(raw, dynstr_off, dynstr_size, st_name) {
+            Some(v) if !v.is_empty() => v,
+            _ => continue,
+        };
+        let name_hash = fnv1a64(&name);
+        let should_insert = match state.globals.get(&name_hash) {
+            Some(existing) if existing.defined == 1 && existing.bind == 1 => false,
+            _ => true,
+        };
+        if should_insert {
+            state.globals.insert(
+                name_hash,
+                GlobalSymbol {
+                    object_index: 0,
+                    symbol_index: 0,
+                    bind: 2,
+                    defined: 1,
+                    address: 0,
+                },
+            );
+        }
+    }
+
+    ERR_OK
+}
+
+fn ingest_shared_object_symbols(state: &mut LinkerState, path: &Path) -> u32 {
+    let raw = match fs::read(path) {
+        Ok(v) => v,
+        Err(_) => return ERR_FILE_NOT_FOUND,
+    };
+    match probe_object_format_bytes(&raw) {
+        OBJECT_FORMAT_ELF64 => ingest_shared_elf_symbols(state, &raw),
+        OBJECT_FORMAT_COFF64 | OBJECT_FORMAT_MACHO64 => ERR_OK,
+        OBJECT_FORMAT_UNKNOWN => ERR_OK,
+        _ => ERR_OK,
+    }
 }
 
 fn coff_characteristics_to_flags(characteristics: u32, section_name: &str) -> (u32, u64) {
@@ -2293,6 +2462,13 @@ fn apply_linker_script_statement(
         return ERR_OK;
     }
 
+    if let Some(arg) = extract_directive_arg(statement, "OUTPUT_ARCH") {
+        if let Some(target) = parse_target_value(&arg) {
+            state.target = target;
+        }
+        return ERR_OK;
+    }
+
     if let Some(arg) = extract_directive_arg(statement, "OUTPUT") {
         if !arg.is_empty() {
             let output_path = resolve_script_path(script_dir, &arg);
@@ -2358,6 +2534,32 @@ fn apply_linker_script_statement(
                 .inputs
                 .push(intern_string(path.to_string_lossy().to_string()));
         }
+        return ERR_OK;
+    }
+
+    if let Some(arg) = extract_directive_arg(statement, "AS_NEEDED") {
+        let prior = state.link_as_needed;
+        state.link_as_needed = true;
+        for token in tokenize_script_args(&arg) {
+            let path = resolve_script_path(script_dir, &token);
+            state
+                .inputs
+                .push(intern_string(path.to_string_lossy().to_string()));
+        }
+        state.link_as_needed = prior;
+        return ERR_OK;
+    }
+
+    if let Some(arg) = extract_directive_arg(statement, "NO_AS_NEEDED") {
+        let prior = state.link_as_needed;
+        state.link_as_needed = false;
+        for token in tokenize_script_args(&arg) {
+            let path = resolve_script_path(script_dir, &token);
+            state
+                .inputs
+                .push(intern_string(path.to_string_lossy().to_string()));
+        }
+        state.link_as_needed = prior;
         return ERR_OK;
     }
 
@@ -3128,6 +3330,34 @@ pub extern "C" fn host_linker_get_as_needed() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_set_no_undefined(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.no_undefined = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_no_undefined() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.no_undefined { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_allow_dynamic_unresolved() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.no_undefined {
+        return 0;
+    }
+    if state.link_static {
+        return 0;
+    }
+    if state.needed_shared_libs.is_empty() {
+        return 0;
+    }
+    1
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_set_dynamic_linker(path: u64) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.dynamic_linker_path = path;
@@ -3276,6 +3506,17 @@ pub extern "C" fn host_linker_ingest_macho_object(path: u64) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.objects.push(parsed);
     set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_ingest_shared_object(path: u64) -> u32 {
+    let p = match to_path(path) {
+        Some(v) => v,
+        None => return ERR_FILE_NOT_FOUND,
+    };
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let status = ingest_shared_object_symbols(&mut state, &p);
+    set_last_error(&mut state, status)
 }
 
 #[no_mangle]
