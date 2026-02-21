@@ -52,6 +52,13 @@ const TARGET_X86_64_LINUX: u32 = 1;
 const TARGET_X86_64_WINDOWS: u32 = 2;
 const TARGET_X86_64_MACOS: u32 = 3;
 
+const BUILD_ID_MODE_NONE: u32 = 0;
+const BUILD_ID_MODE_FAST: u32 = 1;
+const BUILD_ID_MODE_MD5: u32 = 2;
+const BUILD_ID_MODE_SHA1: u32 = 3;
+const BUILD_ID_MODE_UUID: u32 = 4;
+const BUILD_ID_MODE_HEX: u32 = 5;
+
 const OBJECT_FORMAT_UNKNOWN: u32 = 0;
 const OBJECT_FORMAT_ELF64: u32 = 1;
 const OBJECT_FORMAT_COFF64: u32 = 2;
@@ -146,6 +153,13 @@ struct LinkerState {
     strip_debug: bool,
     gc_sections: bool,
     allow_multiple_definition: bool,
+    build_id_mode: u32,
+    build_id_bytes: Vec<u8>,
+    z_relro: bool,
+    z_now: bool,
+    z_execstack: bool,
+    memory_origin: u64,
+    memory_length: u64,
     pending_elf_entry: u64,
     pending_elf_image_base: u64,
     extracted_members: Vec<PathBuf>,
@@ -548,7 +562,14 @@ fn write_u64_le(dst: &mut [u8], off: usize, value: u64) {
     }
 }
 
-fn write_minimal_elf_exec(path: &Path, entry: u64, image_base: u64, image_payload: &[u8]) -> u32 {
+fn write_minimal_elf_exec(
+    path: &Path,
+    entry: u64,
+    image_base: u64,
+    image_payload: &[u8],
+    build_id: &[u8],
+    execstack: bool,
+) -> u32 {
     let segment_offset = 0x1000usize;
     let payload = if image_payload.is_empty() {
         vec![0u8; 1]
@@ -587,7 +608,8 @@ fn write_minimal_elf_exec(path: &Path, entry: u64, image_base: u64, image_payloa
     // PT_LOAD program header.
     let phoff = 64usize;
     write_u32_le(&mut out, phoff + 0, PT_LOAD);
-    write_u32_le(&mut out, phoff + 4, 0x7); // RWX for MVP
+    let segment_flags = if execstack { 0x7 } else { 0x5 };
+    write_u32_le(&mut out, phoff + 4, segment_flags);
     write_u64_le(&mut out, phoff + 8, segment_offset as u64);
     write_u64_le(&mut out, phoff + 16, image_base);
     write_u64_le(&mut out, phoff + 24, image_base);
@@ -596,6 +618,7 @@ fn write_minimal_elf_exec(path: &Path, entry: u64, image_base: u64, image_payloa
     write_u64_le(&mut out, phoff + 48, 0x1000);
 
     out[segment_offset..segment_offset + payload.len()].copy_from_slice(&payload);
+    append_build_id_note(&mut out, build_id);
     write_all(path, &out)
 }
 
@@ -685,6 +708,25 @@ fn parse_u64_auto(text: &str) -> Option<u64> {
     raw.parse::<u64>().ok()
 }
 
+fn parse_u64_scaled(text: &str) -> Option<u64> {
+    let raw = text.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.ends_with('k') || raw.ends_with('K') {
+        return parse_u64_auto(&raw[..raw.len().saturating_sub(1)]).map(|v| v.saturating_mul(1024));
+    }
+    if raw.ends_with('m') || raw.ends_with('M') {
+        return parse_u64_auto(&raw[..raw.len().saturating_sub(1)])
+            .map(|v| v.saturating_mul(1024 * 1024));
+    }
+    if raw.ends_with('g') || raw.ends_with('G') {
+        return parse_u64_auto(&raw[..raw.len().saturating_sub(1)])
+            .map(|v| v.saturating_mul(1024 * 1024 * 1024));
+    }
+    parse_u64_auto(raw)
+}
+
 fn parse_defsym_spec(text: &str) -> Option<(u64, u64)> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -748,6 +790,159 @@ fn parse_target_value(raw: &str) -> Option<u32> {
         }
         "x86_64-none" => Some(TARGET_X86_64_NONE),
         _ => None,
+    }
+}
+
+fn parse_hex_bytes(raw: &str) -> Option<Vec<u8>> {
+    let body = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(raw)
+        .trim();
+    if body.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut text = body.to_string();
+    if text.len() % 2 != 0 {
+        text.insert(0, '0');
+    }
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i + 1 < bytes.len() {
+        let pair = std::str::from_utf8(&bytes[i..i + 2]).ok()?;
+        let value = u8::from_str_radix(pair, 16).ok()?;
+        out.push(value);
+        i += 2;
+    }
+    Some(out)
+}
+
+fn parse_memory_keyword_value(statement: &str, keyword: &str) -> Option<u64> {
+    let upper = statement.to_ascii_uppercase();
+    let key_upper = keyword.to_ascii_uppercase();
+    let pos = upper.find(&key_upper)?;
+    let mut tail = statement[pos + keyword.len()..].trim_start();
+    if tail.starts_with('=') {
+        tail = tail[1..].trim_start();
+    }
+    let mut end = tail.len();
+    for (idx, ch) in tail.char_indices() {
+        if ch == ',' || ch == '}' || ch == ')' || ch.is_ascii_whitespace() {
+            end = idx;
+            break;
+        }
+    }
+    let token = tail[..end].trim();
+    parse_u64_scaled(token)
+}
+
+fn parse_sections_location_assignment(statement: &str) -> Option<u64> {
+    let t = statement.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let bytes = t.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] == b'.' {
+            let mut cursor = idx + 1;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b'=' {
+                let mut rhs = t[cursor + 1..].trim();
+                rhs = rhs.split('{').next().unwrap_or(rhs).trim();
+                rhs = rhs.split('}').next().unwrap_or(rhs).trim();
+                rhs = rhs.split(',').next().unwrap_or(rhs).trim();
+                rhs = rhs.split_whitespace().next().unwrap_or(rhs).trim();
+                return parse_u64_scaled(rhs);
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn parse_build_id_mode_and_bytes(raw: &str) -> Option<(u32, Vec<u8>)> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "fast" {
+        return Some((BUILD_ID_MODE_FAST, Vec::new()));
+    }
+    if normalized == "none" {
+        return Some((BUILD_ID_MODE_NONE, Vec::new()));
+    }
+    if normalized == "md5" {
+        return Some((BUILD_ID_MODE_MD5, Vec::new()));
+    }
+    if normalized == "sha1" {
+        return Some((BUILD_ID_MODE_SHA1, Vec::new()));
+    }
+    if normalized == "uuid" {
+        return Some((BUILD_ID_MODE_UUID, Vec::new()));
+    }
+    let bytes = parse_hex_bytes(raw)?;
+    Some((BUILD_ID_MODE_HEX, bytes))
+}
+
+fn fnv1a64_seeded(text: &[u8], seed: u64) -> u64 {
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = seed;
+    for b in text {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+fn make_pseudo_digest(payload: &[u8], size: usize, salt: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size);
+    let mut seed = 0xcbf29ce484222325u64 ^ salt;
+    while out.len() < size {
+        let hash = fnv1a64_seeded(payload, seed).to_le_bytes();
+        out.extend_from_slice(&hash);
+        seed = seed.wrapping_mul(0x100000001b3).wrapping_add(0x9e3779b97f4a7c15);
+    }
+    out.truncate(size);
+    out
+}
+
+fn build_id_payload(state: &LinkerState, image_payload: &[u8]) -> Vec<u8> {
+    match state.build_id_mode {
+        BUILD_ID_MODE_NONE => Vec::new(),
+        BUILD_ID_MODE_FAST => make_pseudo_digest(image_payload, 8, 0x11),
+        BUILD_ID_MODE_MD5 => make_pseudo_digest(image_payload, 16, 0x22),
+        BUILD_ID_MODE_SHA1 => make_pseudo_digest(image_payload, 20, 0x33),
+        BUILD_ID_MODE_UUID => {
+            let mut uuid = make_pseudo_digest(image_payload, 16, 0x44);
+            if uuid.len() == 16 {
+                uuid[6] = (uuid[6] & 0x0f) | 0x40;
+                uuid[8] = (uuid[8] & 0x3f) | 0x80;
+            }
+            uuid
+        }
+        BUILD_ID_MODE_HEX => state.build_id_bytes.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn append_build_id_note(out: &mut Vec<u8>, build_id: &[u8]) {
+    if build_id.is_empty() {
+        return;
+    }
+    let namesz = 4u32;
+    let descsz = build_id.len().min(u32::MAX as usize) as u32;
+    let note_type = 3u32;
+    out.extend_from_slice(&namesz.to_le_bytes());
+    out.extend_from_slice(&descsz.to_le_bytes());
+    out.extend_from_slice(&note_type.to_le_bytes());
+    out.extend_from_slice(b"GNU\0");
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    out.extend_from_slice(build_id);
+    while out.len() % 4 != 0 {
+        out.push(0);
     }
 }
 
@@ -1553,6 +1748,17 @@ fn apply_linker_script_statement(
         return apply_linker_script_file(state, &include_path, depth + 1);
     }
 
+    if let Some(origin) = parse_memory_keyword_value(statement, "ORIGIN") {
+        state.memory_origin = origin;
+        state.image_base = origin;
+    }
+    if let Some(length) = parse_memory_keyword_value(statement, "LENGTH") {
+        state.memory_length = length;
+    }
+    if let Some(dot_addr) = parse_sections_location_assignment(statement) {
+        state.image_base = dot_addr;
+    }
+
     ERR_OK
 }
 
@@ -2007,6 +2213,74 @@ pub extern "C" fn host_linker_set_allow_multiple_definition(enabled: u32) -> u32
 pub extern "C" fn host_linker_get_allow_multiple_definition() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
     if state.allow_multiple_definition { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_enable_build_id_default() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.build_id_mode = BUILD_ID_MODE_FAST;
+    state.build_id_bytes.clear();
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_build_id(spec: u64) -> u32 {
+    let text = match read_c_string(spec) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let (mode, bytes) = match parse_build_id_mode_and_bytes(&text) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.build_id_mode = mode;
+    state.build_id_bytes = bytes;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_build_id_mode() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.build_id_mode
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_z_option(option: u64) -> u32 {
+    let text = match read_c_string(option) {
+        Some(v) => v.trim().to_ascii_lowercase(),
+        None => return ERR_INVALID_FORMAT,
+    };
+    if text.is_empty() {
+        return ERR_INVALID_FORMAT;
+    }
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    match text.as_str() {
+        "relro" => state.z_relro = true,
+        "norelro" => state.z_relro = false,
+        "now" => state.z_now = true,
+        "lazy" => state.z_now = false,
+        "execstack" => state.z_execstack = true,
+        "noexecstack" => state.z_execstack = false,
+        _ => return set_last_error(&mut state, ERR_UNSUPPORTED_FLAG),
+    }
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_z_flags() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    let mut flags = 0u32;
+    if state.z_relro {
+        flags |= 1;
+    }
+    if state.z_now {
+        flags |= 2;
+    }
+    if state.z_execstack {
+        flags |= 4;
+    }
+    flags
 }
 
 #[no_mangle]
@@ -2695,6 +2969,8 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
     ensure_parent(&path);
     let state = linker().lock().expect("linker mutex poisoned");
     let image = build_flat_image_bytes(&state);
+    let build_id = build_id_payload(&state, &image);
+    let execstack = state.z_execstack;
     let entry = if state.pending_elf_entry != 0 {
         state.pending_elf_entry
     } else {
@@ -2706,7 +2982,7 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
         state.image_base.max(0x0010_0000)
     };
     drop(state);
-    write_minimal_elf_exec(&path, entry, image_base, &image)
+    write_minimal_elf_exec(&path, entry, image_base, &image, &build_id, execstack)
 }
 
 #[no_mangle]
