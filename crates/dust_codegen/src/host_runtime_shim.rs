@@ -36,6 +36,7 @@ const SHF_WRITE: u64 = 0x1;
 const SHF_EXECINSTR: u64 = 0x4;
 const SHT_NOBITS: u32 = 8;
 const SHT_PROGBITS: u32 = 1;
+const SHT_DYNAMIC: u32 = 6;
 const SHT_DYNSYM: u32 = 11;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
@@ -49,6 +50,8 @@ const DT_NEEDED: u64 = 1;
 const DT_STRTAB: u64 = 5;
 const DT_STRSZ: u64 = 10;
 const DT_SONAME: u64 = 14;
+const DT_RPATH: u64 = 15;
+const DT_RUNPATH: u64 = 29;
 const DT_FLAGS: u64 = 30;
 const DF_BIND_NOW: u64 = 0x8;
 
@@ -181,7 +184,13 @@ struct LinkerState {
     link_pie: bool,
     link_static: bool,
     link_as_needed: bool,
+    whole_archive: bool,
+    link_new_dtags: bool,
+    link_copy_dt_needed_entries: bool,
     no_undefined: bool,
+    sysroot_path: u64,
+    rpaths: Vec<u64>,
+    rpath_links: Vec<u64>,
     dynamic_linker_path: u64,
     soname: u64,
     needed_shared_libs: Vec<u64>,
@@ -249,6 +258,50 @@ fn to_path(handle: u64) -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from(handle.to_string()))
+}
+
+fn push_unique_search_path(paths: &mut Vec<String>, path: String) {
+    let trimmed = path.trim().to_string();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !paths.iter().any(|existing| existing == &trimmed) {
+        paths.push(trimmed);
+    }
+}
+
+fn linker_default_search_paths(target: u32, sysroot: Option<&Path>) -> Vec<String> {
+    let suffixes: &[&str] = if target == TARGET_X86_64_WINDOWS {
+        &["lib", "lib64", "usr/lib", "usr/lib64"]
+    } else if target == TARGET_X86_64_MACOS {
+        &["usr/lib", "usr/local/lib", "lib"]
+    } else {
+        &["lib64", "usr/lib64", "lib", "usr/lib", "usr/local/lib"]
+    };
+
+    let mut out = Vec::new();
+    for suffix in suffixes {
+        if let Some(root) = sysroot {
+            let mut joined = PathBuf::from(root);
+            for component in suffix.split('/') {
+                if !component.is_empty() {
+                    joined.push(component);
+                }
+            }
+            push_unique_search_path(&mut out, joined.to_string_lossy().to_string());
+        } else {
+            let full = format!("/{}", suffix);
+            push_unique_search_path(&mut out, full);
+        }
+    }
+
+    if target == TARGET_X86_64_WINDOWS && sysroot.is_none() {
+        push_unique_search_path(&mut out, "C:\\Windows\\System32".to_string());
+        push_unique_search_path(&mut out, "C:\\Windows".to_string());
+        push_unique_search_path(&mut out, ".".to_string());
+    }
+
+    out
 }
 
 fn refresh_args() {
@@ -966,6 +1019,8 @@ fn write_minimal_elf_exec(
     interp_path: Option<&str>,
     soname: Option<&str>,
     needed_libs: &[String],
+    runpath: Option<&str>,
+    use_new_dtags: bool,
     z_now: bool,
 ) -> u32 {
     let phoff = 64usize;
@@ -1003,6 +1058,16 @@ fn write_minimal_elf_exec(
             soname_offset = Some(off);
         }
     }
+    let mut runpath_offset: Option<u64> = None;
+    if let Some(raw) = runpath {
+        let value = raw.trim();
+        if !value.is_empty() {
+            let off = dynstr.len() as u64;
+            dynstr.extend_from_slice(value.as_bytes());
+            dynstr.push(0);
+            runpath_offset = Some(off);
+        }
+    }
     if dynstr.is_empty() {
         dynstr.push(0);
     }
@@ -1011,6 +1076,7 @@ fn write_minimal_elf_exec(
         || !interp_bytes.is_empty()
         || !needed_offsets.is_empty()
         || soname_offset.is_some()
+        || runpath_offset.is_some()
         || z_now;
 
     let mut dynamic_entries: Vec<(u64, u64)> = Vec::new();
@@ -1020,6 +1086,10 @@ fn write_minimal_elf_exec(
         }
         if let Some(off) = soname_offset {
             dynamic_entries.push((DT_SONAME, off));
+        }
+        if let Some(off) = runpath_offset {
+            let runpath_tag = if use_new_dtags { DT_RUNPATH } else { DT_RPATH };
+            dynamic_entries.push((runpath_tag, off));
         }
         // DT_STRTAB patched after layout is known.
         dynamic_entries.push((DT_STRTAB, 0));
@@ -1346,6 +1416,140 @@ fn linker_has_needed_library(state: &LinkerState, name: &str) -> bool {
     false
 }
 
+fn add_needed_library_if_missing(state: &mut LinkerState, name: &str) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if linker_has_needed_library(state, trimmed) {
+        return;
+    }
+    let handle = intern_string(trimmed);
+    state.needed_shared_libs.push(handle);
+}
+
+fn parse_elf_needed_libraries(raw: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    if raw.len() < 64 || &raw[0..4] != b"\x7fELF" {
+        return out;
+    }
+    if raw[4] != 2 || raw[5] != 1 {
+        return out;
+    }
+
+    let shoff = match read_u64_le_at(raw, 40) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    let shentsize = match read_u16_le_at(raw, 58) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    let shnum = match read_u16_le_at(raw, 60) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    if shoff == 0 || shentsize < 64 || shnum == 0 {
+        return out;
+    }
+    if shoff.saturating_add(shentsize.saturating_mul(shnum)) > raw.len() {
+        return out;
+    }
+
+    let mut dynamic_offset = 0usize;
+    let mut dynamic_size = 0usize;
+    let mut dynstr_section = 0usize;
+    for idx in 0..shnum {
+        let off = shoff + idx.saturating_mul(shentsize);
+        let sh_type = match read_u32_le_at(raw, off + 4) {
+            Some(v) => v,
+            None => continue,
+        };
+        if sh_type == SHT_DYNAMIC {
+            dynamic_offset = match read_u64_le_at(raw, off + 24) {
+                Some(v) => v as usize,
+                None => 0,
+            };
+            dynamic_size = match read_u64_le_at(raw, off + 32) {
+                Some(v) => v as usize,
+                None => 0,
+            };
+            dynstr_section = match read_u32_le_at(raw, off + 40) {
+                Some(v) => v as usize,
+                None => 0,
+            };
+            break;
+        }
+    }
+    if dynamic_offset == 0 || dynamic_size < 16 || dynstr_section >= shnum {
+        return out;
+    }
+    if dynamic_offset.saturating_add(dynamic_size) > raw.len() {
+        return out;
+    }
+
+    let dynstr_off = shoff + dynstr_section.saturating_mul(shentsize);
+    let dynstr_offset = match read_u64_le_at(raw, dynstr_off + 24) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    let dynstr_size = match read_u64_le_at(raw, dynstr_off + 32) {
+        Some(v) => v as usize,
+        None => return out,
+    };
+    if dynstr_offset == 0 || dynstr_size == 0 || dynstr_offset.saturating_add(dynstr_size) > raw.len() {
+        return out;
+    }
+
+    let mut off = dynamic_offset;
+    let end = dynamic_offset + dynamic_size;
+    while off + 16 <= end {
+        let tag = match read_u64_le_at(raw, off) {
+            Some(v) => v,
+            None => break,
+        };
+        let value = match read_u64_le_at(raw, off + 8) {
+            Some(v) => v,
+            None => break,
+        };
+        if tag == DT_NULL {
+            break;
+        }
+        if tag == DT_NEEDED {
+            if let Some(name) = dynstr_symbol_name(raw, dynstr_offset, dynstr_size, value as u32) {
+                let trimmed = name.trim().to_string();
+                if !trimmed.is_empty() && !out.iter().any(|existing| existing == &trimmed) {
+                    out.push(trimmed);
+                }
+            }
+        }
+        off += 16;
+    }
+
+    out
+}
+
+fn append_copy_dt_needed_entries(state: &mut LinkerState, resolved: &str) {
+    if !state.link_copy_dt_needed_entries {
+        return;
+    }
+    let resolved_trimmed = resolved.trim();
+    if resolved_trimmed.is_empty() {
+        return;
+    }
+    let path = Path::new(resolved_trimmed);
+    let raw = match fs::read(path) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    if probe_object_format_bytes(&raw) != OBJECT_FORMAT_ELF64 {
+        return;
+    }
+    for needed in parse_elf_needed_libraries(&raw) {
+        add_needed_library_if_missing(state, &needed);
+    }
+}
+
 fn parse_defsym_spec(text: &str) -> Option<(u64, u64)> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -1592,7 +1796,11 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     state.entry = 0x0010_0000;
     state.image_base = 0x0001_0000;
     state.link_as_needed = false;
+    state.whole_archive = false;
+    state.link_new_dtags = true;
+    state.link_copy_dt_needed_entries = false;
     state.no_undefined = false;
+    state.sysroot_path = 0;
     state.link_pie = false;
     state.link_shared = false;
     state.link_static = false;
@@ -3278,6 +3486,84 @@ pub extern "C" fn host_linker_add_search_path(path: u64) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_set_sysroot(path: u64) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.sysroot_path = path;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_sysroot() -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.sysroot_path
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_add_rpath(path: u64) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.rpaths.push(path);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_rpath_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.rpaths.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_rpath(index: u32) -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.rpaths.get(index as usize).copied().unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_add_rpath_link(path: u64) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.rpath_links.push(path);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_rpath_link_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.rpath_links.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_rpath_link(index: u32) -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.rpath_links.get(index as usize).copied().unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_default_search_path_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    let sysroot = if state.sysroot_path != 0 {
+        read_c_string(state.sysroot_path).map(PathBuf::from)
+    } else {
+        None
+    };
+    linker_default_search_paths(state.target, sysroot.as_deref()).len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_default_search_path(index: u32) -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    let sysroot = if state.sysroot_path != 0 {
+        read_c_string(state.sysroot_path).map(PathBuf::from)
+    } else {
+        None
+    };
+    let paths = linker_default_search_paths(state.target, sysroot.as_deref());
+    if let Some(path) = paths.get(index as usize) {
+        intern_string(path)
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_set_shared(enabled: u32) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.link_shared = enabled != 0;
@@ -3327,6 +3613,45 @@ pub extern "C" fn host_linker_set_as_needed(enabled: u32) -> u32 {
 pub extern "C" fn host_linker_get_as_needed() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
     if state.link_as_needed { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_new_dtags(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.link_new_dtags = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_new_dtags() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.link_new_dtags { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_copy_dt_needed_entries(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.link_copy_dt_needed_entries = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_copy_dt_needed_entries() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.link_copy_dt_needed_entries { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_whole_archive(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.whole_archive = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_whole_archive() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.whole_archive { 1 } else { 0 }
 }
 
 #[no_mangle]
@@ -3398,11 +3723,8 @@ pub extern "C" fn host_linker_note_needed_library(requested: u64, resolved: u64,
         Some(v) => v,
         None => return set_last_error(&mut state, ERR_INVALID_FORMAT),
     };
-    if linker_has_needed_library(&state, &normalized) {
-        return set_last_error(&mut state, ERR_OK);
-    }
-    let handle = intern_string(normalized);
-    state.needed_shared_libs.push(handle);
+    add_needed_library_if_missing(&mut state, &normalized);
+    append_copy_dt_needed_entries(&mut state, &resolved_text);
     set_last_error(&mut state, ERR_OK)
 }
 
@@ -4043,6 +4365,7 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
     let build_id = build_id_payload(&state, &image);
     let execstack = state.z_execstack;
     let z_now = state.z_now;
+    let new_dtags = state.link_new_dtags;
     let link_shared = state.link_shared;
     let link_pie = state.link_pie;
     let link_static = state.link_static;
@@ -4084,6 +4407,20 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
             }
         }
     }
+    let mut runpaths = Vec::new();
+    for handle in &state.rpaths {
+        if let Some(path_text) = read_c_string(*handle) {
+            let trimmed = path_text.trim().to_string();
+            if !trimmed.is_empty() {
+                runpaths.push(trimmed);
+            }
+        }
+    }
+    let runpath = if link_static || runpaths.is_empty() {
+        None
+    } else {
+        Some(runpaths.join(":"))
+    };
     drop(state);
     write_minimal_elf_exec(
         &path,
@@ -4096,6 +4433,8 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
         dynamic_linker.as_deref(),
         soname.as_deref(),
         &needed_libs,
+        runpath.as_deref(),
+        new_dtags,
         z_now,
     )
 }
