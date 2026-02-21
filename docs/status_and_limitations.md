@@ -19,10 +19,15 @@
 - kernel workflows are documented around `obj` + `dustlink` with `kernel-link` as compatibility mode
 - host runtime shim grew linker-oriented intrinsics used by Dust-built `dustlink`
 - host runtime shim shared-symbol ingestion now includes ELF, PE, COFF, and Mach-O metadata paths
+- host runtime shim accepts both x86_64 and arm64 machine/cpu IDs in COFF/Mach-O object-format probe and symbol-ingest paths
 - linker-script application now uses block-aware statement splitting and additional `SECTIONS`/`ENTRY(symbol)` semantics used by dustlink parity work
 - linker-script runtime semantics now include sysroot-aware `SEARCH_DIR(=...)` handling and `INPUT` support for `-L` search-path tokens / `-l` needed-library token capture
+- linker-script runtime semantics now include expression evaluation (`ORIGIN/LENGTH/ADDR/LOADADDR/SIZEOF/ALIGN` + arithmetic), `ASSERT(...)` checks, and `PHDRS`/`VERSION` compatibility blocks with structural validation
 - compatibility CLI controls in host linker runtime now carry explicit state for hash-style, thread count, eh-frame-header, diagnostics toggles, print-gc toggles, and icf mode
+- host linker CLI compatibility coverage now includes script/export families (`--version-script`, `--dynamic-list`, `--trace-symbol`) plus broader no-op compatibility flags (`--print-map`, `--start-lib`, `--end-lib`, `--emit-relocs`, `--strip-all`)
+- host linker CLI compatibility coverage now also includes major `lld-link` slash-option families (`/OUT`, `/ENTRY`, `/MACHINE`, `/LIBPATH`, `/DEFAULTLIB`, `/MAP`, `/DLL`, `/SUBSYSTEM`, `/OPT`, `/WX`) plus common slash metadata compatibility paths
 - ELF write path no longer primes output with ident-only stubs during staged emission; header/finalize stages both execute complete ELF writer flow with section-index validation on staged section calls
+- PE/Mach-O host writers now emit sectionized images from alloc chunks instead of a single synthetic text payload section
 
 ## Important Mismatches to Track
 

@@ -22,12 +22,20 @@ This repository contains:
 - `dust kernel-link` remains available but is deprecated; use `dust obj` + `dustlink`.
 - Host linker runtime support used by Dust-built tools now includes:
   - cross-format shared-symbol ingestion (ELF/PE/COFF/Mach-O paths)
+  - COFF/Mach-O object-format probe and symbol-ingest acceptance for `arm64` machine/cpu IDs in addition to `x86_64`
   - block-aware linker-script statement splitting
   - section output-address parsing inside `SECTIONS { ... }`
+  - script expression evaluation (`ORIGIN/LENGTH/ADDR/LOADADDR/SIZEOF/ALIGN` + `+/-`) and `ASSERT(...)` checks
+  - `PHDRS` / `VERSION` script compatibility blocks with block-shape validation
+  - `SECTIONS ... AT(<expr>)` load-address capture
   - required-symbol registration for `ENTRY(symbol)` script form
   - sysroot-aware `SEARCH_DIR(=...)` linker-script resolution and script `INPUT` handling for `-L` / `-l` tokens
   - compatibility-flag state wiring for hash-style/threading/diagnostic/icf controls
+  - broader CLI compatibility handling for script/export-related ld/lld flags (`--version-script`, `--dynamic-list`, `--trace-symbol`, `--print-map`, `--start-lib`, `--end-lib`)
+  - `lld-link` slash-option compatibility handling (`/OUT`, `/ENTRY`, `/MACHINE`, `/LIBPATH`, `/DEFAULTLIB`, `/MAP`, `/DLL`, `/SUBSYSTEM`, `/OPT`, `/WX`)
+  - additional target alias parsing for `aarch64`/`arm64` triples (mapped to platform linker target families)
   - complete ELF writer execution in staged header/finalize flow (no ident-only prewrite)
+  - sectionized PE/Mach-O host writer emission from real alloc chunks
 
 ### What Works Today (v0.2)
 

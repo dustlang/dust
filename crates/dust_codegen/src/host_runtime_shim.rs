@@ -42,6 +42,7 @@ const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
 const EV_CURRENT: u32 = 1;
@@ -86,6 +87,11 @@ const OBJECT_FORMAT_UNKNOWN: u32 = 0;
 const OBJECT_FORMAT_ELF64: u32 = 1;
 const OBJECT_FORMAT_COFF64: u32 = 2;
 const OBJECT_FORMAT_MACHO64: u32 = 3;
+
+const COFF_MACHINE_X86_64: u16 = 0x8664;
+const COFF_MACHINE_AARCH64: u16 = 0xaa64;
+const MACH_CPU_X86_64: u32 = 0x0100_0007;
+const MACH_CPU_ARM64: u32 = 0x0100_000c;
 
 const STORAGE_CLASS_EXTERNAL: u8 = 2;
 const STORAGE_CLASS_STATIC: u8 = 3;
@@ -608,7 +614,7 @@ fn coff_member_defined_hashes(payload: &[u8]) -> HashSet<u64> {
         Some(v) => v,
         None => return out,
     };
-    if machine != 0x8664 {
+    if machine != COFF_MACHINE_X86_64 && machine != COFF_MACHINE_AARCH64 {
         return out;
     }
     let ptr_symtab = match read_u32_le_at(payload, 8) {
@@ -681,7 +687,7 @@ fn macho_member_defined_hashes(payload: &[u8]) -> HashSet<u64> {
         Some(v) => v,
         None => return out,
     };
-    if cpu_type != 0x0100_0007 {
+    if cpu_type != MACH_CPU_X86_64 && cpu_type != MACH_CPU_ARM64 {
         return out;
     }
     let ncmds = match read_u32_le_at(payload, 16) {
@@ -976,6 +982,28 @@ fn build_alloc_segments(state: &LinkerState) -> Vec<(u64, Vec<u8>, u32, u32)> {
         }
     }
     out.sort_by_key(|(addr, _, obj, sec)| (*addr, *obj, *sec));
+    out
+}
+
+#[derive(Clone)]
+struct OutputChunk {
+    addr: u64,
+    bytes: Vec<u8>,
+    flags: u64,
+}
+
+fn build_output_chunks(state: &LinkerState) -> Vec<OutputChunk> {
+    let mut out = Vec::new();
+    for (addr, bytes, obj_idx, sec_idx) in build_alloc_segments(state) {
+        let flags = state
+            .objects
+            .get(obj_idx as usize)
+            .and_then(|o| o.sections.iter().find(|s| s.index == sec_idx))
+            .map(|s| s.flags)
+            .unwrap_or(SHF_ALLOC);
+        out.push(OutputChunk { addr, bytes, flags });
+    }
+    out.sort_by_key(|c| c.addr);
     out
 }
 
@@ -1670,19 +1698,52 @@ fn parse_target_value(raw: &str) -> Option<u32> {
     let normalized = raw.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "x86_64-linux" | "x86_64-linux-gnu" | "x86_64-unknown-linux-gnu" | "elf_x86_64"
-        | "elf64-x86-64" => Some(TARGET_X86_64_LINUX),
+        | "elf64-x86-64"
+        | "aarch64-linux"
+        | "aarch64-linux-gnu"
+        | "aarch64-unknown-linux-gnu"
+        | "elf64-littleaarch64"
+        | "aarch64elf" => Some(TARGET_X86_64_LINUX),
         "x86_64-windows-msvc"
         | "x86_64-pc-windows-msvc"
         | "x86_64-windows-gnu"
+        | "aarch64-windows-msvc"
+        | "aarch64-pc-windows-msvc"
+        | "aarch64-windows-gnu"
+        | "arm64pe"
         | "i386pep"
         | "pep"
         | "pe-x86-64" => Some(TARGET_X86_64_WINDOWS),
-        "x86_64-apple-darwin" | "x86_64-macos" | "mach_o_x86_64" | "macho-x86-64" => {
+        "x86_64-apple-darwin"
+        | "x86_64-macos"
+        | "mach_o_x86_64"
+        | "macho-x86-64"
+        | "aarch64-apple-darwin"
+        | "arm64-apple-darwin"
+        | "arm64-macos"
+        | "macho-arm64" => {
             Some(TARGET_X86_64_MACOS)
         }
         "x86_64-none" => Some(TARGET_X86_64_NONE),
         _ => None,
     }
+}
+
+fn validate_named_block_statement(statement: &str, directive: &str) -> bool {
+    let trimmed = statement.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    if !upper.starts_with(directive) {
+        return false;
+    }
+    let open = match trimmed.find('{') {
+        Some(v) => v,
+        None => return false,
+    };
+    let close = match trimmed.rfind('}') {
+        Some(v) => v,
+        None => return false,
+    };
+    close > open
 }
 
 fn parse_hash_style_value(raw: &str) -> Option<u32> {
@@ -1721,7 +1782,98 @@ fn parse_hex_bytes(raw: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn parse_memory_keyword_value(statement: &str, keyword: &str) -> Option<u64> {
+fn eval_script_atom(state: &LinkerState, raw: &str) -> Option<u64> {
+    let token = trim_quotes(raw.trim());
+    if token.is_empty() {
+        return None;
+    }
+    if token == "." {
+        return Some(state.image_base);
+    }
+    if let Some(v) = parse_u64_scaled(token) {
+        return Some(v);
+    }
+    let upper = token.to_ascii_uppercase();
+    if upper.starts_with("ORIGIN(") && token.ends_with(')') {
+        return Some(state.memory_origin);
+    }
+    if upper.starts_with("LENGTH(") && token.ends_with(')') {
+        return Some(state.memory_length);
+    }
+    if upper.starts_with("ADDR(") && token.ends_with(')') {
+        return Some(state.image_base);
+    }
+    if upper.starts_with("LOADADDR(") && token.ends_with(')') {
+        return Some(state.pending_elf_image_base.max(state.image_base));
+    }
+    if upper.starts_with("SIZEOF(") && token.ends_with(')') {
+        return Some(state.image_size as u64);
+    }
+    if upper.starts_with("ALIGN(") && token.ends_with(')') {
+        let inner = &token[6..token.len().saturating_sub(1)];
+        let align = eval_script_expr(state, inner)?;
+        if align == 0 {
+            return Some(state.image_base);
+        }
+        return Some(align_up(state.image_base, align));
+    }
+    state.globals.get(&fnv1a64(token)).map(|g| g.address)
+}
+
+fn eval_script_expr(state: &LinkerState, raw: &str) -> Option<u64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut paren_depth = 0u32;
+    let mut start = 0usize;
+    let mut op = '+';
+    let mut acc = 0u64;
+    let mut have_value = false;
+    for (idx, ch) in text.char_indices() {
+        if ch == '(' {
+            paren_depth = paren_depth.saturating_add(1);
+            continue;
+        }
+        if ch == ')' {
+            if paren_depth > 0 {
+                paren_depth -= 1;
+            }
+            continue;
+        }
+        if paren_depth == 0 && (ch == '+' || ch == '-') {
+            let atom = text[start..idx].trim();
+            if !atom.is_empty() {
+                let value = eval_script_atom(state, atom)?;
+                if !have_value {
+                    acc = value;
+                    have_value = true;
+                } else if op == '+' {
+                    acc = acc.wrapping_add(value);
+                } else {
+                    acc = acc.wrapping_sub(value);
+                }
+            }
+            op = ch;
+            start = idx + ch.len_utf8();
+        }
+    }
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        let value = eval_script_atom(state, tail)?;
+        if !have_value {
+            acc = value;
+            have_value = true;
+        } else if op == '+' {
+            acc = acc.wrapping_add(value);
+        } else {
+            acc = acc.wrapping_sub(value);
+        }
+    }
+    if have_value { Some(acc) } else { None }
+}
+
+fn parse_memory_keyword_value(state: &LinkerState, statement: &str, keyword: &str) -> Option<u64> {
     let upper = statement.to_ascii_uppercase();
     let key_upper = keyword.to_ascii_uppercase();
     let pos = upper.find(&key_upper)?;
@@ -1729,18 +1881,31 @@ fn parse_memory_keyword_value(statement: &str, keyword: &str) -> Option<u64> {
     if tail.starts_with('=') {
         tail = tail[1..].trim_start();
     }
+    let mut depth = 0u32;
     let mut end = tail.len();
     for (idx, ch) in tail.char_indices() {
-        if ch == ',' || ch == '}' || ch == ')' || ch.is_ascii_whitespace() {
+        if ch == '(' {
+            depth = depth.saturating_add(1);
+            continue;
+        }
+        if ch == ')' {
+            if depth == 0 {
+                end = idx;
+                break;
+            }
+            depth -= 1;
+            continue;
+        }
+        if depth == 0 && (ch == ',' || ch == '}' || ch == ';') {
             end = idx;
             break;
         }
     }
     let token = tail[..end].trim();
-    parse_u64_scaled(token)
+    eval_script_expr(state, token)
 }
 
-fn parse_sections_location_assignment(statement: &str) -> Option<u64> {
+fn parse_sections_location_assignment(state: &LinkerState, statement: &str) -> Option<u64> {
     let t = statement.trim();
     if t.is_empty() {
         return None;
@@ -1758,8 +1923,7 @@ fn parse_sections_location_assignment(statement: &str) -> Option<u64> {
                 rhs = rhs.split('{').next().unwrap_or(rhs).trim();
                 rhs = rhs.split('}').next().unwrap_or(rhs).trim();
                 rhs = rhs.split(',').next().unwrap_or(rhs).trim();
-                rhs = rhs.split_whitespace().next().unwrap_or(rhs).trim();
-                return parse_u64_scaled(rhs);
+                return eval_script_expr(state, rhs);
             }
         }
         idx += 1;
@@ -1767,7 +1931,7 @@ fn parse_sections_location_assignment(statement: &str) -> Option<u64> {
     None
 }
 
-fn parse_sections_output_address(statement: &str) -> Option<u64> {
+fn parse_sections_output_address(state: &LinkerState, statement: &str) -> Option<u64> {
     let t = statement.trim();
     if t.is_empty() {
         return None;
@@ -1800,8 +1964,7 @@ fn parse_sections_output_address(statement: &str) -> Option<u64> {
             let tail = t[cursor..].trim_start();
             let before_colon = tail.split(':').next().unwrap_or("").trim();
             if !before_colon.is_empty() {
-                let token = before_colon.split_whitespace().next().unwrap_or("").trim();
-                if let Some(value) = parse_u64_scaled(token) {
+                if let Some(value) = eval_script_expr(state, before_colon) {
                     return Some(value);
                 }
             }
@@ -1809,6 +1972,73 @@ fn parse_sections_output_address(statement: &str) -> Option<u64> {
         idx += 1;
     }
     None
+}
+
+fn parse_sections_load_address(state: &LinkerState, statement: &str) -> Option<u64> {
+    let upper = statement.to_ascii_uppercase();
+    let pos = upper.find("AT(")?;
+    let raw = &statement[pos + 3..];
+    let mut depth = 1u32;
+    let mut end = None;
+    for (idx, ch) in raw.char_indices() {
+        if ch == '(' {
+            depth = depth.saturating_add(1);
+        } else if ch == ')' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                end = Some(idx);
+                break;
+            }
+        }
+    }
+    let close = end?;
+    let expr = raw[..close].trim();
+    eval_script_expr(state, expr)
+}
+
+fn split_assert_args(raw: &str) -> (String, String) {
+    let mut paren_depth = 0u32;
+    for (idx, ch) in raw.char_indices() {
+        if ch == '(' {
+            paren_depth = paren_depth.saturating_add(1);
+            continue;
+        }
+        if ch == ')' {
+            if paren_depth > 0 {
+                paren_depth -= 1;
+            }
+            continue;
+        }
+        if ch == ',' && paren_depth == 0 {
+            let lhs = raw[..idx].trim().to_string();
+            let rhs = trim_quotes(raw[idx + 1..].trim()).to_string();
+            return (lhs, rhs);
+        }
+    }
+    (raw.trim().to_string(), String::new())
+}
+
+fn eval_script_condition(state: &LinkerState, raw: &str) -> Option<bool> {
+    let expr = raw.trim();
+    if expr.is_empty() {
+        return None;
+    }
+    for op in ["==", "!=", ">=", "<=", ">", "<"] {
+        if let Some(pos) = expr.find(op) {
+            let lhs = eval_script_expr(state, expr[..pos].trim())?;
+            let rhs = eval_script_expr(state, expr[pos + op.len()..].trim())?;
+            return Some(match op {
+                "==" => lhs == rhs,
+                "!=" => lhs != rhs,
+                ">=" => lhs >= rhs,
+                "<=" => lhs <= rhs,
+                ">" => lhs > rhs,
+                "<" => lhs < rhs,
+                _ => false,
+            });
+        }
+    }
+    eval_script_expr(state, expr).map(|v| v != 0)
 }
 
 fn parse_sections_region_assignment(statement: &str) -> Option<String> {
@@ -2138,7 +2368,7 @@ fn probe_object_format_bytes(raw: &[u8]) -> u32 {
 
     if raw.len() >= 2 {
         let machine = u16::from_le_bytes([raw[0], raw[1]]);
-        if machine == 0x8664 {
+        if machine == COFF_MACHINE_X86_64 || machine == COFF_MACHINE_AARCH64 {
             return OBJECT_FORMAT_COFF64;
         }
     }
@@ -2475,7 +2705,7 @@ fn ingest_shared_coff_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
         Some(v) => v,
         None => return ERR_INVALID_FORMAT,
     };
-    if machine != 0x8664 {
+    if machine != COFF_MACHINE_X86_64 && machine != COFF_MACHINE_AARCH64 {
         return ERR_UNSUPPORTED_TARGET;
     }
     let ptr_symtab = match read_u32_le_at(raw, 8) {
@@ -2546,7 +2776,7 @@ fn ingest_shared_macho_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
         Some(v) => v,
         None => return ERR_INVALID_FORMAT,
     };
-    if cpu_type != 0x0100_0007 {
+    if cpu_type != MACH_CPU_X86_64 && cpu_type != MACH_CPU_ARM64 {
         return ERR_UNSUPPORTED_TARGET;
     }
 
@@ -2767,7 +2997,7 @@ fn parse_coff_object(path: u64) -> Result<ObjectRecord, u32> {
     }
 
     let machine = read_u16_le_at(&raw, 0).ok_or(ERR_INVALID_FORMAT)?;
-    if machine != 0x8664 {
+    if machine != COFF_MACHINE_X86_64 && machine != COFF_MACHINE_AARCH64 {
         return Err(ERR_UNSUPPORTED_TARGET);
     }
     let section_count = read_u16_le_at(&raw, 2).ok_or(ERR_INVALID_FORMAT)? as usize;
@@ -2785,7 +3015,11 @@ fn parse_coff_object(path: u64) -> Result<ObjectRecord, u32> {
         path,
         file_size: raw.len() as u64,
         elf_type: 1,
-        machine: EM_X86_64,
+        machine: if machine == COFF_MACHINE_AARCH64 {
+            EM_AARCH64
+        } else {
+            EM_X86_64
+        },
         sections: Vec::new(),
         symbols: Vec::new(),
         relocations: Vec::new(),
@@ -2951,7 +3185,7 @@ fn parse_macho_object(path: u64) -> Result<ObjectRecord, u32> {
     }
 
     let cpu_type = read_u32_le_at(&raw, 4).ok_or(ERR_INVALID_FORMAT)?;
-    if cpu_type != 0x0100_0007 {
+    if cpu_type != MACH_CPU_X86_64 && cpu_type != MACH_CPU_ARM64 {
         return Err(ERR_UNSUPPORTED_TARGET);
     }
     let ncmds = read_u32_le_at(&raw, 16).ok_or(ERR_INVALID_FORMAT)? as usize;
@@ -2964,7 +3198,11 @@ fn parse_macho_object(path: u64) -> Result<ObjectRecord, u32> {
         path,
         file_size: raw.len() as u64,
         elf_type: 1,
-        machine: EM_X86_64,
+        machine: if cpu_type == MACH_CPU_ARM64 {
+            EM_AARCH64
+        } else {
+            EM_X86_64
+        },
         sections: Vec::new(),
         symbols: Vec::new(),
         relocations: Vec::new(),
@@ -3160,20 +3398,162 @@ fn parse_macho_object(path: u64) -> Result<ObjectRecord, u32> {
     Ok(record)
 }
 
-fn write_minimal_pe_exec(path: &Path, entry: u64, image_base: u64, image_payload: &[u8]) -> u32 {
-    let payload = if image_payload.is_empty() {
-        vec![0xC3u8]
+fn write_fixed_name(dst: &mut [u8], off: usize, width: usize, text: &[u8]) {
+    if off + width > dst.len() {
+        return;
+    }
+    for i in 0..width {
+        dst[off + i] = 0;
+    }
+    let len = text.len().min(width);
+    dst[off..off + len].copy_from_slice(&text[..len]);
+}
+
+fn pe_section_characteristics(flags: u64) -> u32 {
+    let exec = flags & SHF_EXECINSTR != 0;
+    let write = flags & SHF_WRITE != 0;
+    let mut out = 0x4000_0000u32;
+    if exec {
+        out |= 0x2000_0000;
+        out |= 0x0000_0020;
     } else {
-        image_payload.to_vec()
+        out |= 0x0000_0040;
+    }
+    if write {
+        out |= 0x8000_0000;
+    }
+    out
+}
+
+fn pe_section_name(flags: u64, index: usize) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    let stem = if flags & SHF_EXECINSTR != 0 {
+        b".text".as_slice()
+    } else if flags & SHF_WRITE != 0 {
+        b".data".as_slice()
+    } else {
+        b".rdata".as_slice()
     };
+    let stem_len = stem.len().min(8);
+    out[..stem_len].copy_from_slice(&stem[..stem_len]);
+    if index > 0 {
+        let suffix = format!("{:02}", index % 100);
+        let s = suffix.as_bytes();
+        let mut pos = stem_len;
+        for byte in s {
+            if pos >= 8 {
+                break;
+            }
+            out[pos] = *byte;
+            pos += 1;
+        }
+    }
+    out
+}
+
+fn write_minimal_pe_exec(path: &Path, entry: u64, image_base: u64, chunks: &[OutputChunk]) -> u32 {
+    #[derive(Clone)]
+    struct PeSectionPlan {
+        name: [u8; 8],
+        rva: u32,
+        raw_off: u32,
+        virt_size: u32,
+        raw_size: u32,
+        characteristics: u32,
+        bytes: Vec<u8>,
+    }
+
+    let mut section_chunks = chunks.to_vec();
+    if section_chunks.is_empty() {
+        section_chunks.push(OutputChunk {
+            addr: 0,
+            bytes: vec![0xC3u8],
+            flags: SHF_ALLOC | SHF_EXECINSTR,
+        });
+    }
+
     let file_align = 0x200u32;
     let section_align = 0x1000u32;
     let pe_offset = 0x80usize;
-    let headers_raw_size = align_up_u32((pe_offset + 4 + 20 + 0xF0 + 40) as u32, file_align) as usize;
-    let text_raw_size = align_up_u32(payload.len().max(1) as u32, file_align) as usize;
-    let size_of_image = align_up_u32(0x1000u32.saturating_add(payload.len().max(1) as u32), section_align);
+    let section_count = section_chunks.len().min(u16::MAX as usize);
+    let headers_unaligned = pe_offset + 4 + 20 + 0xF0 + section_count * 40;
+    let headers_raw_size = align_up_u32(headers_unaligned as u32, file_align);
 
-    let mut out = vec![0u8; headers_raw_size + text_raw_size];
+    let source_base = section_chunks.first().map(|c| c.addr).unwrap_or(0);
+    let mut plans = Vec::<PeSectionPlan>::new();
+    let mut cursor_raw = 0u32;
+    let mut cursor_rva = 0x1000u32;
+    let mut size_of_code = 0u32;
+    let mut size_of_init_data = 0u32;
+    let mut base_of_code = 0u32;
+    let mut first_exec_rva = 0u32;
+    let mut first_data_rva = 0u32;
+    let mut max_rva_end = 0u32;
+
+    for (idx, chunk) in section_chunks.iter().enumerate().take(section_count) {
+        let rel = chunk.addr.saturating_sub(source_base);
+        let rel_u32 = rel.min(u32::MAX as u64) as u32;
+        let base_rva = 0x1000u32.saturating_add(rel_u32);
+        let rva = align_up_u32(base_rva.max(cursor_rva), section_align);
+        let raw_off = align_up_u32(cursor_raw, file_align);
+        let virt_size = (chunk.bytes.len().max(1)).min(u32::MAX as usize) as u32;
+        let raw_size = align_up_u32(virt_size, file_align);
+        let characteristics = pe_section_characteristics(chunk.flags);
+        if chunk.flags & SHF_EXECINSTR != 0 {
+            if first_exec_rva == 0 {
+                first_exec_rva = rva;
+            }
+            size_of_code = size_of_code.saturating_add(raw_size);
+            if base_of_code == 0 {
+                base_of_code = rva;
+            }
+        } else {
+            if first_data_rva == 0 {
+                first_data_rva = rva;
+            }
+            size_of_init_data = size_of_init_data.saturating_add(raw_size);
+        }
+        let rva_end = rva.saturating_add(align_up_u32(virt_size, section_align));
+        if rva_end > max_rva_end {
+            max_rva_end = rva_end;
+        }
+        plans.push(PeSectionPlan {
+            name: pe_section_name(chunk.flags, idx),
+            rva,
+            raw_off,
+            virt_size,
+            raw_size,
+            characteristics,
+            bytes: chunk.bytes.clone(),
+        });
+        cursor_raw = raw_off.saturating_add(raw_size);
+        cursor_rva = rva_end;
+    }
+
+    if base_of_code == 0 {
+        base_of_code = 0x1000;
+    }
+    if first_data_rva == 0 {
+        first_data_rva = base_of_code;
+    }
+
+    let resolved_base = if image_base == 0 {
+        0x0000_0001_4000_0000u64
+    } else {
+        image_base
+    };
+    let mut entry_rva = if entry >= source_base && source_base != 0 {
+        0x1000u32.saturating_add((entry - source_base).min(u32::MAX as u64) as u32)
+    } else {
+        first_exec_rva.max(base_of_code)
+    };
+    if entry_rva < 0x1000 {
+        entry_rva = 0x1000;
+    }
+
+    let total_size = headers_raw_size as usize + cursor_raw as usize;
+    let size_of_image = align_up_u32(max_rva_end.max(0x1000), section_align);
+    let mut out = vec![0u8; total_size];
 
     out[0] = b'M';
     out[1] = b'Z';
@@ -3182,7 +3562,7 @@ fn write_minimal_pe_exec(path: &Path, entry: u64, image_base: u64, image_payload
     out[pe_offset..pe_offset + 4].copy_from_slice(b"PE\0\0");
     let coff = pe_offset + 4;
     write_u16_le(&mut out, coff + 0, 0x8664);
-    write_u16_le(&mut out, coff + 2, 1);
+    write_u16_le(&mut out, coff + 2, section_count as u16);
     write_u32_le(&mut out, coff + 4, 0);
     write_u32_le(&mut out, coff + 8, 0);
     write_u32_le(&mut out, coff + 12, 0);
@@ -3191,25 +3571,17 @@ fn write_minimal_pe_exec(path: &Path, entry: u64, image_base: u64, image_payload
 
     let opt = coff + 20;
     write_u16_le(&mut out, opt + 0, 0x20b);
-    let resolved_base = if image_base == 0 {
-        0x0000_0001_4000_0000u64
-    } else {
-        image_base
-    };
-    let entry_rva = if entry >= resolved_base {
-        (entry - resolved_base) as u32
-    } else {
-        0x1000
-    };
-    write_u32_le(&mut out, opt + 16, entry_rva.max(0x1000));
-    write_u32_le(&mut out, opt + 20, 0x1000);
+    write_u32_le(&mut out, opt + 4, size_of_code);
+    write_u32_le(&mut out, opt + 8, size_of_init_data);
+    write_u32_le(&mut out, opt + 16, entry_rva);
+    write_u32_le(&mut out, opt + 20, base_of_code);
     write_u64_le(&mut out, opt + 24, resolved_base);
     write_u32_le(&mut out, opt + 32, section_align);
     write_u32_le(&mut out, opt + 36, file_align);
     write_u16_le(&mut out, opt + 48, 6);
     write_u16_le(&mut out, opt + 50, 0);
     write_u32_le(&mut out, opt + 56, size_of_image);
-    write_u32_le(&mut out, opt + 60, headers_raw_size as u32);
+    write_u32_le(&mut out, opt + 60, headers_raw_size);
     write_u16_le(&mut out, opt + 68, 3);
     write_u16_le(&mut out, opt + 70, 0x8140);
     write_u64_le(&mut out, opt + 72, 0x0010_0000);
@@ -3218,41 +3590,150 @@ fn write_minimal_pe_exec(path: &Path, entry: u64, image_base: u64, image_payload
     write_u64_le(&mut out, opt + 96, 0x0000_1000);
     write_u32_le(&mut out, opt + 108, 16);
 
-    let sh = opt + 0xF0;
-    out[sh + 0..sh + 8].copy_from_slice(b".text\0\0\0");
-    write_u32_le(&mut out, sh + 8, payload.len().max(1) as u32);
-    write_u32_le(&mut out, sh + 12, 0x1000);
-    write_u32_le(&mut out, sh + 16, text_raw_size as u32);
-    write_u32_le(&mut out, sh + 20, headers_raw_size as u32);
-    write_u32_le(&mut out, sh + 36, 0x6000_0020);
+    let mut sh = opt + 0xF0;
+    for plan in &plans {
+        write_fixed_name(&mut out, sh, 8, &plan.name);
+        write_u32_le(&mut out, sh + 8, plan.virt_size);
+        write_u32_le(&mut out, sh + 12, plan.rva);
+        write_u32_le(&mut out, sh + 16, plan.raw_size);
+        write_u32_le(&mut out, sh + 20, headers_raw_size.saturating_add(plan.raw_off));
+        write_u32_le(&mut out, sh + 36, plan.characteristics);
+        sh += 40;
+    }
 
-    out[headers_raw_size..headers_raw_size + payload.len()].copy_from_slice(&payload);
+    for plan in &plans {
+        let start = headers_raw_size as usize + plan.raw_off as usize;
+        let end = start.saturating_add(plan.bytes.len());
+        if end <= out.len() {
+            out[start..end].copy_from_slice(&plan.bytes);
+        }
+    }
+
     write_all(path, &out)
 }
 
-fn write_minimal_macho_exec(path: &Path, entry: u64, image_base: u64, image_payload: &[u8]) -> u32 {
-    let payload = if image_payload.is_empty() {
-        vec![0xC3u8]
+fn macho_section_names(flags: u64, index: usize) -> (&'static [u8], &'static [u8]) {
+    if flags & SHF_EXECINSTR != 0 {
+        if index == 0 {
+            (b"__text", b"__TEXT")
+        } else {
+            (b"__textx", b"__TEXT")
+        }
+    } else if flags & SHF_WRITE != 0 {
+        if index == 0 {
+            (b"__data", b"__DATA")
+        } else {
+            (b"__datax", b"__DATA")
+        }
+    } else if index == 0 {
+        (b"__const", b"__DATA_CONST")
     } else {
-        image_payload.to_vec()
-    };
+        (b"__constx", b"__DATA_CONST")
+    }
+}
+
+fn macho_section_flags(flags: u64) -> u32 {
+    if flags & SHF_EXECINSTR != 0 {
+        0x8000_0400
+    } else {
+        0x0
+    }
+}
+
+fn write_minimal_macho_exec(path: &Path, entry: u64, image_base: u64, chunks: &[OutputChunk]) -> u32 {
+    #[derive(Clone)]
+    struct MachSectionPlan {
+        name: [u8; 16],
+        seg: [u8; 16],
+        rva: u64,
+        size: u64,
+        file_offset: u32,
+        align_pow: u32,
+        flags: u32,
+        bytes: Vec<u8>,
+    }
+
+    let mut section_chunks = chunks.to_vec();
+    if section_chunks.is_empty() {
+        section_chunks.push(OutputChunk {
+            addr: 0,
+            bytes: vec![0xC3u8],
+            flags: SHF_ALLOC | SHF_EXECINSTR,
+        });
+    }
+
+    let nsects = section_chunks.len().min(u32::MAX as usize);
     let header_size = 32usize;
-    let segment_cmd_size = 72usize;
+    let segment_cmd_size = 72usize + nsects * 80usize;
     let thread_cmd_size = 184usize;
     let sizeofcmds = segment_cmd_size + thread_cmd_size;
-    let fileoff = header_size + sizeofcmds;
-    let filesize = fileoff + payload.len();
+    let fileoff = align_up((header_size + sizeofcmds) as u64, 0x1000) as usize;
+
+    let source_base = section_chunks.first().map(|c| c.addr).unwrap_or(0);
+    let mut plans = Vec::<MachSectionPlan>::new();
+    let mut cursor_rva = 0u64;
+    let mut max_rva_end = 0u64;
+    let mut any_write = false;
+    let mut any_exec = false;
+    let mut first_exec_rva = 0u64;
+
+    for (idx, chunk) in section_chunks.iter().enumerate().take(nsects) {
+        let rel = chunk.addr.saturating_sub(source_base);
+        let rva = align_up(rel.max(cursor_rva), 0x1000);
+        let size = chunk.bytes.len().max(1) as u64;
+        let (sect_name, seg_name) = macho_section_names(chunk.flags, idx);
+        let mut name = [0u8; 16];
+        let mut seg = [0u8; 16];
+        let nlen = sect_name.len().min(16);
+        let slen = seg_name.len().min(16);
+        name[..nlen].copy_from_slice(&sect_name[..nlen]);
+        seg[..slen].copy_from_slice(&seg_name[..slen]);
+        let writable = chunk.flags & SHF_WRITE != 0;
+        let executable = chunk.flags & SHF_EXECINSTR != 0;
+        if writable {
+            any_write = true;
+        }
+        if executable {
+            any_exec = true;
+            if first_exec_rva == 0 {
+                first_exec_rva = rva;
+            }
+        }
+        let end = rva.saturating_add(size);
+        if end > max_rva_end {
+            max_rva_end = end;
+        }
+        plans.push(MachSectionPlan {
+            name,
+            seg,
+            rva,
+            size,
+            file_offset: (fileoff as u64 + rva).min(u32::MAX as u64) as u32,
+            align_pow: 12,
+            flags: macho_section_flags(chunk.flags),
+            bytes: chunk.bytes.clone(),
+        });
+        cursor_rva = align_up(end, 0x1000);
+    }
+
+    let payload_size = max_rva_end.max(1);
+    let filesize = fileoff.saturating_add(payload_size as usize);
     let vmaddr = if image_base == 0 {
         0x0000_0001_0000_0000u64
     } else {
         image_base
     };
-    let entry_addr = if entry == 0 {
-        vmaddr + fileoff as u64
+    let mut entry_addr = if entry >= source_base && source_base != 0 {
+        vmaddr.saturating_add(entry.saturating_sub(source_base))
+    } else if first_exec_rva != 0 {
+        vmaddr.saturating_add(first_exec_rva)
     } else {
-        entry
+        vmaddr
     };
-    let vmsize = align_up(filesize as u64, 0x1000);
+    if entry_addr < vmaddr {
+        entry_addr = vmaddr;
+    }
+    let vmsize = align_up(payload_size, 0x1000);
 
     let mut out = vec![0u8; filesize];
     write_u32_le(&mut out, 0, 0xfeedfacf);
@@ -3267,15 +3748,39 @@ fn write_minimal_macho_exec(path: &Path, entry: u64, image_base: u64, image_payl
     let seg = header_size;
     write_u32_le(&mut out, seg + 0, 0x19);
     write_u32_le(&mut out, seg + 4, segment_cmd_size as u32);
-    out[seg + 8..seg + 14].copy_from_slice(b"__TEXT");
+    write_fixed_name(&mut out, seg + 8, 16, b"__DUSTLINK");
     write_u64_le(&mut out, seg + 24, vmaddr);
     write_u64_le(&mut out, seg + 32, vmsize);
-    write_u64_le(&mut out, seg + 40, 0);
-    write_u64_le(&mut out, seg + 48, filesize as u64);
-    write_u32_le(&mut out, seg + 56, 7);
-    write_u32_le(&mut out, seg + 60, 5);
-    write_u32_le(&mut out, seg + 64, 0);
+    write_u64_le(&mut out, seg + 40, fileoff as u64);
+    write_u64_le(&mut out, seg + 48, payload_size);
+    let mut prot = 1u32;
+    if any_write {
+        prot |= 2;
+    }
+    if any_exec {
+        prot |= 4;
+    }
+    write_u32_le(&mut out, seg + 56, prot);
+    write_u32_le(&mut out, seg + 60, prot);
+    write_u32_le(&mut out, seg + 64, nsects as u32);
     write_u32_le(&mut out, seg + 68, 0);
+
+    let mut sec_off = seg + 72;
+    for plan in &plans {
+        write_fixed_name(&mut out, sec_off, 16, &plan.name);
+        write_fixed_name(&mut out, sec_off + 16, 16, &plan.seg);
+        write_u64_le(&mut out, sec_off + 32, vmaddr.saturating_add(plan.rva));
+        write_u64_le(&mut out, sec_off + 40, plan.size);
+        write_u32_le(&mut out, sec_off + 48, plan.file_offset);
+        write_u32_le(&mut out, sec_off + 52, plan.align_pow);
+        write_u32_le(&mut out, sec_off + 56, 0);
+        write_u32_le(&mut out, sec_off + 60, 0);
+        write_u32_le(&mut out, sec_off + 64, plan.flags);
+        write_u32_le(&mut out, sec_off + 68, 0);
+        write_u32_le(&mut out, sec_off + 72, 0);
+        write_u32_le(&mut out, sec_off + 76, 0);
+        sec_off += 80;
+    }
 
     let thread = seg + segment_cmd_size;
     write_u32_le(&mut out, thread + 0, 0x5);
@@ -3284,11 +3789,18 @@ fn write_minimal_macho_exec(path: &Path, entry: u64, image_base: u64, image_payl
     write_u32_le(&mut out, thread + 12, 42);
 
     let regs = thread + 16;
-    write_u64_le(&mut out, regs + (7 * 8), vmaddr + vmsize - 16);
+    write_u64_le(&mut out, regs + (7 * 8), vmaddr + vmsize.saturating_sub(16));
     write_u64_le(&mut out, regs + (16 * 8), entry_addr);
     write_u64_le(&mut out, regs + (17 * 8), 0x202);
 
-    out[fileoff..fileoff + payload.len()].copy_from_slice(&payload);
+    for plan in &plans {
+        let start = fileoff.saturating_add(plan.rva as usize);
+        let end = start.saturating_add(plan.bytes.len());
+        if end <= out.len() {
+            out[start..end].copy_from_slice(&plan.bytes);
+        }
+    }
+
     write_all(path, &out)
 }
 
@@ -3332,6 +3844,33 @@ fn apply_linker_script_statement(
     script_dir: &Path,
     depth: u32,
 ) -> u32 {
+    let statement_trimmed = statement.trim();
+    let statement_upper = statement_trimmed.to_ascii_uppercase();
+    if statement_upper.starts_with("PHDRS") {
+        if validate_named_block_statement(statement_trimmed, "PHDRS") {
+            return ERR_OK;
+        }
+        return ERR_INVALID_FORMAT;
+    }
+    if statement_upper.starts_with("VERSION") {
+        if validate_named_block_statement(statement_trimmed, "VERSION") {
+            return ERR_OK;
+        }
+        return ERR_INVALID_FORMAT;
+    }
+
+    if let Some(arg) = extract_directive_arg(statement, "ASSERT") {
+        let (expr, message) = split_assert_args(&arg);
+        let ok = eval_script_condition(state, &expr).unwrap_or(false);
+        if ok {
+            return ERR_OK;
+        }
+        if !message.is_empty() {
+            eprintln!("dustlink: script ASSERT failed: {}", message);
+        }
+        return ERR_CONFLICTING_OPTIONS;
+    }
+
     if let Some(arg) = extract_directive_arg(statement, "ENTRY") {
         if let Some(v) = parse_u64_auto(&arg) {
             state.entry = v;
@@ -3454,17 +3993,20 @@ fn apply_linker_script_statement(
         return apply_linker_script_file(state, &include_path, depth + 1);
     }
 
-    if let Some(origin) = parse_memory_keyword_value(statement, "ORIGIN") {
+    if let Some(origin) = parse_memory_keyword_value(state, statement, "ORIGIN") {
         state.memory_origin = origin;
         state.image_base = origin;
     }
-    if let Some(length) = parse_memory_keyword_value(statement, "LENGTH") {
+    if let Some(length) = parse_memory_keyword_value(state, statement, "LENGTH") {
         state.memory_length = length;
     }
-    if let Some(dot_addr) = parse_sections_location_assignment(statement) {
+    if let Some(dot_addr) = parse_sections_location_assignment(state, statement) {
         state.image_base = dot_addr;
-    } else if let Some(section_addr) = parse_sections_output_address(statement) {
+    } else if let Some(section_addr) = parse_sections_output_address(state, statement) {
         state.image_base = section_addr;
+    } else if let Some(load_addr) = parse_sections_load_address(state, statement) {
+        state.pending_elf_image_base = load_addr;
+        state.image_base = load_addr;
     } else if parse_sections_region_assignment(statement).is_some() && state.memory_origin != 0 {
         state.image_base = state.memory_origin;
     }
@@ -5217,7 +5759,7 @@ pub extern "C" fn host_linker_write_pe_image(output: u64) -> u32 {
     };
     ensure_parent(&path);
     let state = linker().lock().expect("linker mutex poisoned");
-    let image = build_flat_image_bytes(&state);
+    let chunks = build_output_chunks(&state);
     let entry = if state.pending_elf_entry != 0 {
         state.pending_elf_entry
     } else {
@@ -5231,7 +5773,7 @@ pub extern "C" fn host_linker_write_pe_image(output: u64) -> u32 {
         0x0000_0001_4000_0000u64
     };
     drop(state);
-    write_minimal_pe_exec(&path, entry, image_base, &image)
+    write_minimal_pe_exec(&path, entry, image_base, &chunks)
 }
 
 #[no_mangle]
@@ -5242,7 +5784,7 @@ pub extern "C" fn host_linker_write_macho_image(output: u64) -> u32 {
     };
     ensure_parent(&path);
     let state = linker().lock().expect("linker mutex poisoned");
-    let image = build_flat_image_bytes(&state);
+    let chunks = build_output_chunks(&state);
     let entry = if state.pending_elf_entry != 0 {
         state.pending_elf_entry
     } else {
@@ -5256,7 +5798,7 @@ pub extern "C" fn host_linker_write_macho_image(output: u64) -> u32 {
         0x0000_0001_0000_0000u64
     };
     drop(state);
-    write_minimal_macho_exec(&path, entry, image_base, &image)
+    write_minimal_macho_exec(&path, entry, image_base, &chunks)
 }
 
 #[no_mangle]

@@ -80,8 +80,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - block-aware linker-script statement splitting (brace/paren-aware) instead of naive split behavior
   - script parsing additions for `SECTIONS` output-address forms and `ENTRY(symbol)` required-symbol registration
   - script parsing additions for `SEARCH_DIR(=...)` sysroot-aware resolution and `INPUT` token handling for `-L`/`-l`
+  - script parsing additions for expression evaluation (`ORIGIN/LENGTH/ADDR/LOADADDR/SIZEOF/ALIGN` + `+/-`) and `ASSERT(...)`
+  - linker-script compatibility handling for `PHDRS` and `VERSION` blocks now validates block structure
+  - script parsing additions for `SECTIONS ... AT(<expr>)` load-address capture
   - compatibility-flag state wiring for `--hash-style`, `--threads`, `--thread-count`, `--eh-frame-hdr`, fatal/color diagnostics toggles, print-gc toggles, and `--icf=*` mode
+  - broader host CLI compatibility handling for ld/lld-style script/export flags (`--version-script`, `--dynamic-list`, `--trace-symbol`, `--print-map`, `--start-lib`, `--end-lib`)
+  - broader host CLI compatibility handling for `lld-link` slash-option families (`/OUT`, `/ENTRY`, `/MACHINE`, `/LIBPATH`, `/DEFAULTLIB`, `/MAP`, `/DLL`, `/SUBSYSTEM`, `/OPT`, `/WX`) and common slash metadata options
+  - target alias expansion to accept `aarch64`/`arm64` triples in host linker target parsing
+  - COFF/Mach-O object-format probe and symbol-ingest acceptance for arm64 machine/cpu IDs
   - ELF writer flow now emits a complete executable during header/finalize stages (instead of ident-only priming), and output-section stream calls validate section-index bounds
+  - PE and Mach-O host writers now emit sectionized images from alloc chunks rather than single synthetic text payload sections
   - parity-oriented relocation/machine support surfaced to Dust linker modules (including additional x86_64 relocation IDs and ELF `EM_AARCH64` acceptance in validator paths)
 
 ### Changed
