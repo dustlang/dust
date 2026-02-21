@@ -37,11 +37,19 @@ const SHF_EXECINSTR: u64 = 0x4;
 const SHT_NOBITS: u32 = 8;
 const SHT_PROGBITS: u32 = 1;
 const PT_LOAD: u32 = 1;
+const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
 const EM_X86_64: u16 = 62;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
 const EV_CURRENT: u32 = 1;
+const DT_NULL: u64 = 0;
+const DT_NEEDED: u64 = 1;
+const DT_STRTAB: u64 = 5;
+const DT_STRSZ: u64 = 10;
+const DT_SONAME: u64 = 14;
+const DT_FLAGS: u64 = 30;
+const DF_BIND_NOW: u64 = 0x8;
 
 const FORMAT_ELF64: u32 = 1;
 const FORMAT_BINARY: u32 = 2;
@@ -174,6 +182,7 @@ struct LinkerState {
     link_as_needed: bool,
     dynamic_linker_path: u64,
     soname: u64,
+    needed_shared_libs: Vec<u64>,
 }
 
 static STRINGS: OnceLock<Mutex<Vec<CString>>> = OnceLock::new();
@@ -953,9 +962,12 @@ fn write_minimal_elf_exec(
     execstack: bool,
     et_type: u16,
     interp_path: Option<&str>,
+    soname: Option<&str>,
+    needed_libs: &[String],
+    z_now: bool,
 ) -> u32 {
     let phoff = 64usize;
-    let mut phnum = 1usize;
+
     let mut interp_bytes = Vec::new();
     if let Some(path) = interp_path {
         let trimmed = path.trim();
@@ -964,8 +976,64 @@ fn write_minimal_elf_exec(
             if interp_bytes.last().copied().unwrap_or(0) != 0 {
                 interp_bytes.push(0);
             }
-            phnum = 2;
         }
+    }
+
+    let mut dynstr = vec![0u8];
+    let mut needed_offsets = Vec::new();
+    for needed in needed_libs {
+        let name = needed.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let off = dynstr.len() as u64;
+        dynstr.extend_from_slice(name.as_bytes());
+        dynstr.push(0);
+        needed_offsets.push(off);
+    }
+    let mut soname_offset: Option<u64> = None;
+    if let Some(raw) = soname {
+        let name = raw.trim();
+        if !name.is_empty() {
+            let off = dynstr.len() as u64;
+            dynstr.extend_from_slice(name.as_bytes());
+            dynstr.push(0);
+            soname_offset = Some(off);
+        }
+    }
+    if dynstr.is_empty() {
+        dynstr.push(0);
+    }
+
+    let dynamic_enabled = et_type == ET_DYN
+        || !interp_bytes.is_empty()
+        || !needed_offsets.is_empty()
+        || soname_offset.is_some()
+        || z_now;
+
+    let mut dynamic_entries: Vec<(u64, u64)> = Vec::new();
+    if dynamic_enabled {
+        for off in &needed_offsets {
+            dynamic_entries.push((DT_NEEDED, *off));
+        }
+        if let Some(off) = soname_offset {
+            dynamic_entries.push((DT_SONAME, off));
+        }
+        // DT_STRTAB patched after layout is known.
+        dynamic_entries.push((DT_STRTAB, 0));
+        dynamic_entries.push((DT_STRSZ, dynstr.len() as u64));
+        if z_now {
+            dynamic_entries.push((DT_FLAGS, DF_BIND_NOW));
+        }
+        dynamic_entries.push((DT_NULL, 0));
+    }
+
+    let mut phnum = 1usize;
+    if !interp_bytes.is_empty() {
+        phnum += 1;
+    }
+    if !dynamic_entries.is_empty() {
+        phnum += 1;
     }
     let phdr_end = phoff.saturating_add(phnum.saturating_mul(56));
     let interp_offset = align_up(phdr_end as u64, 16) as usize;
@@ -981,13 +1049,36 @@ fn write_minimal_elf_exec(
     } else {
         image_payload.to_vec()
     };
-    let mut total_size = segment_offset.saturating_add(payload.len());
+    let payload_offset = segment_offset;
+    let payload_end = payload_offset.saturating_add(payload.len());
+    let mut total_size = payload_end;
     if !interp_bytes.is_empty() {
         let interp_end = interp_offset.saturating_add(interp_bytes.len());
         if interp_end > total_size {
             total_size = interp_end;
         }
     }
+
+    let mut dynamic_offset = 0usize;
+    let mut dynamic_size = 0usize;
+    let mut dynstr_offset = 0usize;
+    let mut dynstr_end = payload_end;
+    if !dynamic_entries.is_empty() {
+        dynamic_size = dynamic_entries.len().saturating_mul(16);
+        dynamic_offset = align_up(payload_end as u64, 16) as usize;
+        dynstr_offset = align_up(dynamic_offset.saturating_add(dynamic_size) as u64, 16) as usize;
+        dynstr_end = dynstr_offset.saturating_add(dynstr.len());
+        if dynstr_end > total_size {
+            total_size = dynstr_end;
+        }
+    }
+
+    let load_end = if dynstr_end > payload_end {
+        dynstr_end
+    } else {
+        payload_end
+    };
+
     let mut out = vec![0u8; total_size];
 
     // ELF header.
@@ -1016,32 +1107,71 @@ fn write_minimal_elf_exec(
     write_u16_le(&mut out, 60, 0); // shnum
     write_u16_le(&mut out, 62, 0); // shstrndx
 
+    let mut ph_index = 0usize;
     if !interp_bytes.is_empty() {
+        let interp_phoff = phoff + ph_index.saturating_mul(56);
         // PT_INTERP program header.
-        write_u32_le(&mut out, phoff, PT_INTERP);
-        write_u32_le(&mut out, phoff + 4, 0x4);
-        write_u64_le(&mut out, phoff + 8, interp_offset as u64);
-        write_u64_le(&mut out, phoff + 16, image_base.saturating_add(interp_offset as u64));
-        write_u64_le(&mut out, phoff + 24, image_base.saturating_add(interp_offset as u64));
-        write_u64_le(&mut out, phoff + 32, interp_bytes.len() as u64);
-        write_u64_le(&mut out, phoff + 40, interp_bytes.len() as u64);
-        write_u64_le(&mut out, phoff + 48, 1);
+        write_u32_le(&mut out, interp_phoff, PT_INTERP);
+        write_u32_le(&mut out, interp_phoff + 4, 0x4);
+        write_u64_le(&mut out, interp_phoff + 8, interp_offset as u64);
+        write_u64_le(
+            &mut out,
+            interp_phoff + 16,
+            image_base.saturating_add(interp_offset as u64),
+        );
+        write_u64_le(
+            &mut out,
+            interp_phoff + 24,
+            image_base.saturating_add(interp_offset as u64),
+        );
+        write_u64_le(&mut out, interp_phoff + 32, interp_bytes.len() as u64);
+        write_u64_le(&mut out, interp_phoff + 40, interp_bytes.len() as u64);
+        write_u64_le(&mut out, interp_phoff + 48, 1);
         out[interp_offset..interp_offset + interp_bytes.len()].copy_from_slice(&interp_bytes);
+        ph_index += 1;
+    }
+
+    if !dynamic_entries.is_empty() {
+        let dynamic_vaddr = image_base.saturating_add(dynamic_offset.saturating_sub(payload_offset) as u64);
+        let dynstr_vaddr = image_base.saturating_add(dynstr_offset.saturating_sub(payload_offset) as u64);
+        for i in 0..dynamic_entries.len() {
+            if dynamic_entries[i].0 == DT_STRTAB {
+                dynamic_entries[i].1 = dynstr_vaddr;
+            }
+        }
+        let dynamic_phoff = phoff + ph_index.saturating_mul(56);
+        write_u32_le(&mut out, dynamic_phoff, PT_DYNAMIC);
+        write_u32_le(&mut out, dynamic_phoff + 4, 0x6);
+        write_u64_le(&mut out, dynamic_phoff + 8, dynamic_offset as u64);
+        write_u64_le(&mut out, dynamic_phoff + 16, dynamic_vaddr);
+        write_u64_le(&mut out, dynamic_phoff + 24, dynamic_vaddr);
+        write_u64_le(&mut out, dynamic_phoff + 32, dynamic_size as u64);
+        write_u64_le(&mut out, dynamic_phoff + 40, dynamic_size as u64);
+        write_u64_le(&mut out, dynamic_phoff + 48, 8);
+
+        for i in 0..dynamic_entries.len() {
+            let off = dynamic_offset + i.saturating_mul(16);
+            let (tag, value) = dynamic_entries[i];
+            write_u64_le(&mut out, off, tag);
+            write_u64_le(&mut out, off + 8, value);
+        }
+        out[dynstr_offset..dynstr_offset + dynstr.len()].copy_from_slice(&dynstr);
+        ph_index += 1;
     }
 
     // PT_LOAD program header.
-    let load_phoff = if interp_bytes.is_empty() { phoff } else { phoff + 56 };
+    let load_phoff = phoff + ph_index.saturating_mul(56);
     write_u32_le(&mut out, load_phoff, PT_LOAD);
     let segment_flags = if execstack { 0x7 } else { 0x5 };
     write_u32_le(&mut out, load_phoff + 4, segment_flags);
-    write_u64_le(&mut out, load_phoff + 8, segment_offset as u64);
+    write_u64_le(&mut out, load_phoff + 8, payload_offset as u64);
     write_u64_le(&mut out, load_phoff + 16, image_base);
     write_u64_le(&mut out, load_phoff + 24, image_base);
-    write_u64_le(&mut out, load_phoff + 32, payload.len() as u64);
-    write_u64_le(&mut out, load_phoff + 40, payload.len() as u64);
+    write_u64_le(&mut out, load_phoff + 32, load_end.saturating_sub(payload_offset) as u64);
+    write_u64_le(&mut out, load_phoff + 40, load_end.saturating_sub(payload_offset) as u64);
     write_u64_le(&mut out, load_phoff + 48, 0x1000);
 
-    out[segment_offset..segment_offset + payload.len()].copy_from_slice(&payload);
+    out[payload_offset..payload_offset + payload.len()].copy_from_slice(&payload);
     append_build_id_note(&mut out, build_id);
     write_all(path, &out)
 }
@@ -1149,6 +1279,69 @@ fn parse_u64_scaled(text: &str) -> Option<u64> {
             .map(|v| v.saturating_mul(1024 * 1024 * 1024));
     }
     parse_u64_auto(raw)
+}
+
+fn basename_from_token(token: &str) -> String {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let p = Path::new(trimmed);
+    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+        return name.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn has_shared_suffix(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".so") || lower.contains(".so.") {
+        return true;
+    }
+    if lower.ends_with(".dylib") || lower.ends_with(".dll") {
+        return true;
+    }
+    false
+}
+
+fn normalize_needed_library_name(requested: &str, resolved: &str) -> Option<String> {
+    let req_base = basename_from_token(requested);
+    let res_base = basename_from_token(resolved);
+
+    if has_shared_suffix(&req_base) {
+        return Some(req_base);
+    }
+    if has_shared_suffix(&res_base) {
+        return Some(res_base);
+    }
+
+    let req_lower = req_base.to_ascii_lowercase();
+    if req_lower.ends_with(".a") {
+        let stem = req_base[..req_base.len().saturating_sub(2)].to_string();
+        return Some(format!("{stem}.so"));
+    }
+    if req_lower.ends_with(".lib") {
+        let stem = req_base[..req_base.len().saturating_sub(4)].to_string();
+        return Some(format!("{stem}.dll"));
+    }
+    if req_base.contains('.') {
+        return Some(req_base);
+    }
+    if req_base.is_empty() {
+        return None;
+    }
+    Some(format!("lib{}.so", req_base))
+}
+
+fn linker_has_needed_library(state: &LinkerState, name: &str) -> bool {
+    for handle in &state.needed_shared_libs {
+        if let Some(existing) = read_c_string(*handle) {
+            if existing == name {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn parse_defsym_spec(text: &str) -> Option<(u64, u64)> {
@@ -2961,6 +3154,45 @@ pub extern "C" fn host_linker_get_soname() -> u64 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_note_needed_library(requested: u64, resolved: u64, contributed: u32) -> u32 {
+    let requested_text = read_c_string(requested).unwrap_or_default();
+    let resolved_text = read_c_string(resolved).unwrap_or_default();
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    if state.link_static {
+        return set_last_error(&mut state, ERR_OK);
+    }
+    if state.link_as_needed && contributed == 0 {
+        return set_last_error(&mut state, ERR_OK);
+    }
+    let normalized = match normalize_needed_library_name(&requested_text, &resolved_text) {
+        Some(v) => v,
+        None => return set_last_error(&mut state, ERR_INVALID_FORMAT),
+    };
+    if linker_has_needed_library(&state, &normalized) {
+        return set_last_error(&mut state, ERR_OK);
+    }
+    let handle = intern_string(normalized);
+    state.needed_shared_libs.push(handle);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_needed_library_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.needed_shared_libs.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_needed_library(index: u32) -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state
+        .needed_shared_libs
+        .get(index as usize)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_search_path_count() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
     state.search_paths.len() as u32
@@ -3569,6 +3801,7 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
     let image = build_flat_image_bytes(&state);
     let build_id = build_id_payload(&state, &image);
     let execstack = state.z_execstack;
+    let z_now = state.z_now;
     let link_shared = state.link_shared;
     let link_pie = state.link_pie;
     let link_static = state.link_static;
@@ -3596,6 +3829,20 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
     } else {
         None
     };
+    let soname = if state.soname != 0 {
+        read_c_string(state.soname)
+    } else {
+        None
+    };
+    let mut needed_libs = Vec::new();
+    for handle in &state.needed_shared_libs {
+        if let Some(name) = read_c_string(*handle) {
+            let trimmed = name.trim().to_string();
+            if !trimmed.is_empty() {
+                needed_libs.push(trimmed);
+            }
+        }
+    }
     drop(state);
     write_minimal_elf_exec(
         &path,
@@ -3606,6 +3853,9 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
         execstack,
         et_type,
         dynamic_linker.as_deref(),
+        soname.as_deref(),
+        &needed_libs,
+        z_now,
     )
 }
 
