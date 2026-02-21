@@ -25,6 +25,9 @@ This repository contains:
   - block-aware linker-script statement splitting
   - section output-address parsing inside `SECTIONS { ... }`
   - required-symbol registration for `ENTRY(symbol)` script form
+  - sysroot-aware `SEARCH_DIR(=...)` linker-script resolution and script `INPUT` handling for `-L` / `-l` tokens
+  - compatibility-flag state wiring for hash-style/threading/diagnostic/icf controls
+  - complete ELF writer execution in staged header/finalize flow (no ident-only prewrite)
 
 ### What Works Today (v0.2)
 

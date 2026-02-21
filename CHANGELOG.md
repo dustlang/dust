@@ -79,6 +79,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - shared-symbol ingest for ELF dynsym, PE export tables, COFF external definitions, and Mach-O external definitions
   - block-aware linker-script statement splitting (brace/paren-aware) instead of naive split behavior
   - script parsing additions for `SECTIONS` output-address forms and `ENTRY(symbol)` required-symbol registration
+  - script parsing additions for `SEARCH_DIR(=...)` sysroot-aware resolution and `INPUT` token handling for `-L`/`-l`
+  - compatibility-flag state wiring for `--hash-style`, `--threads`, `--thread-count`, `--eh-frame-hdr`, fatal/color diagnostics toggles, print-gc toggles, and `--icf=*` mode
+  - ELF writer flow now emits a complete executable during header/finalize stages (instead of ident-only priming), and output-section stream calls validate section-index bounds
   - parity-oriented relocation/machine support surfaced to Dust linker modules (including additional x86_64 relocation IDs and ELF `EM_AARCH64` acceptance in validator paths)
 
 ### Changed

@@ -73,6 +73,15 @@ const BUILD_ID_MODE_SHA1: u32 = 3;
 const BUILD_ID_MODE_UUID: u32 = 4;
 const BUILD_ID_MODE_HEX: u32 = 5;
 
+const HASH_STYLE_NONE: u32 = 0;
+const HASH_STYLE_SYSV: u32 = 1;
+const HASH_STYLE_GNU: u32 = 2;
+const HASH_STYLE_BOTH: u32 = 3;
+
+const ICF_MODE_NONE: u32 = 0;
+const ICF_MODE_SAFE: u32 = 1;
+const ICF_MODE_ALL: u32 = 2;
+
 const OBJECT_FORMAT_UNKNOWN: u32 = 0;
 const OBJECT_FORMAT_ELF64: u32 = 1;
 const OBJECT_FORMAT_COFF64: u32 = 2;
@@ -194,6 +203,13 @@ struct LinkerState {
     dynamic_linker_path: u64,
     soname: u64,
     needed_shared_libs: Vec<u64>,
+    hash_style: u32,
+    thread_count: u32,
+    emit_eh_frame_hdr: bool,
+    fatal_warnings: bool,
+    color_diagnostics: bool,
+    print_gc_sections: bool,
+    icf_mode: u32,
 }
 
 static STRINGS: OnceLock<Mutex<Vec<CString>>> = OnceLock::new();
@@ -1589,12 +1605,65 @@ fn parse_defsym_or_symbol_rhs(state: &LinkerState, text: &str) -> Option<(u64, u
 }
 
 fn tokenize_script_args(value: &str) -> Vec<String> {
-    value
-        .split(|c: char| c.is_ascii_whitespace() || c == ',')
-        .map(trim_quotes)
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_string())
-        .collect()
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut escape = false;
+
+    for ch in value.chars() {
+        if in_string {
+            current.push(ch);
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == quote {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == '"' || ch == '\'' {
+            in_string = true;
+            quote = ch;
+            current.push(ch);
+            continue;
+        }
+
+        if ch == '(' {
+            depth = depth.saturating_add(1);
+            current.push(ch);
+            continue;
+        }
+        if ch == ')' {
+            depth = depth.saturating_sub(1);
+            current.push(ch);
+            continue;
+        }
+
+        if (ch == ',' || ch.is_ascii_whitespace()) && depth == 0 {
+            let token = trim_quotes(current.trim());
+            if !token.is_empty() {
+                out.push(token.to_string());
+            }
+            current.clear();
+            continue;
+        }
+
+        current.push(ch);
+    }
+
+    let tail = trim_quotes(current.trim());
+    if !tail.is_empty() {
+        out.push(tail.to_string());
+    }
+    out
 }
 
 fn parse_target_value(raw: &str) -> Option<u32> {
@@ -1612,6 +1681,17 @@ fn parse_target_value(raw: &str) -> Option<u32> {
             Some(TARGET_X86_64_MACOS)
         }
         "x86_64-none" => Some(TARGET_X86_64_NONE),
+        _ => None,
+    }
+}
+
+fn parse_hash_style_value(raw: &str) -> Option<u32> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "none" => Some(HASH_STYLE_NONE),
+        "sysv" => Some(HASH_STYLE_SYSV),
+        "gnu" => Some(HASH_STYLE_GNU),
+        "both" => Some(HASH_STYLE_BOTH),
         _ => None,
     }
 }
@@ -1729,6 +1809,34 @@ fn parse_sections_output_address(statement: &str) -> Option<u64> {
         idx += 1;
     }
     None
+}
+
+fn parse_sections_region_assignment(statement: &str) -> Option<String> {
+    let t = statement.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let pos = t.rfind('>')?;
+    let tail = t[pos + 1..].trim_start();
+    if tail.is_empty() {
+        return None;
+    }
+    let mut end = tail.len();
+    for (idx, ch) in tail.char_indices() {
+        if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.') {
+            end = idx;
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    let region = tail[..end].trim();
+    if region.is_empty() {
+        None
+    } else {
+        Some(region.to_string())
+    }
 }
 
 fn split_script_statements(cleaned: &str) -> Vec<String> {
@@ -1909,6 +2017,79 @@ fn resolve_script_path(base_dir: &Path, raw: &str) -> PathBuf {
     }
 }
 
+fn resolve_search_dir_path(state: &LinkerState, base_dir: &Path, raw: &str) -> PathBuf {
+    let token = trim_quotes(raw).trim();
+    if let Some(rest) = token.strip_prefix('=') {
+        let trimmed = rest.trim();
+        if state.sysroot_path != 0 {
+            if let Some(sysroot) = to_path(state.sysroot_path) {
+                let suffix = trimmed.trim_start_matches('/');
+                if suffix.is_empty() {
+                    return sysroot;
+                }
+                return sysroot.join(suffix);
+            }
+        }
+        if trimmed.is_empty() {
+            return PathBuf::from(".");
+        }
+        return PathBuf::from(trimmed);
+    }
+    resolve_script_path(base_dir, token)
+}
+
+fn apply_script_input_token(state: &mut LinkerState, script_dir: &Path, token: &str) -> u32 {
+    let trimmed = trim_quotes(token).trim();
+    if trimmed.is_empty() {
+        return ERR_OK;
+    }
+
+    if let Some(path_token) = trimmed.strip_prefix("-L") {
+        if !path_token.trim().is_empty() {
+            let path = resolve_search_dir_path(state, script_dir, path_token);
+            state
+                .search_paths
+                .push(intern_string(path.to_string_lossy().to_string()));
+        }
+        return ERR_OK;
+    }
+
+    if let Some(lib_name) = trimmed.strip_prefix("-l") {
+        let lib = lib_name.trim();
+        if lib.is_empty() {
+            return ERR_INVALID_FORMAT;
+        }
+        if !state.link_static {
+            let normalized = if lib.contains('.') {
+                lib.to_string()
+            } else {
+                format!("lib{}.so", lib)
+            };
+            if !state.link_as_needed {
+                add_needed_library_if_missing(state, &normalized);
+            }
+        }
+        state.inputs.push(intern_string(trimmed));
+        return ERR_OK;
+    }
+
+    let path = resolve_script_path(script_dir, trimmed);
+    state
+        .inputs
+        .push(intern_string(path.to_string_lossy().to_string()));
+    ERR_OK
+}
+
+fn apply_script_input_list(state: &mut LinkerState, script_dir: &Path, arg: &str) -> u32 {
+    for token in tokenize_script_args(arg) {
+        let status = apply_script_input_token(state, script_dir, &token);
+        if status != ERR_OK {
+            return status;
+        }
+    }
+    ERR_OK
+}
+
 fn require_symbol_hash(state: &mut LinkerState, hash: u64) {
     if hash == 0 {
         return;
@@ -1934,6 +2115,13 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     state.link_pie = false;
     state.link_shared = false;
     state.link_static = false;
+    state.hash_style = HASH_STYLE_BOTH;
+    state.thread_count = 0;
+    state.emit_eh_frame_hdr = true;
+    state.fatal_warnings = false;
+    state.color_diagnostics = false;
+    state.print_gc_sections = false;
+    state.icf_mode = ICF_MODE_NONE;
 }
 
 fn probe_object_format_bytes(raw: &[u8]) -> u32 {
@@ -3187,7 +3375,7 @@ fn apply_linker_script_statement(
 
     if let Some(arg) = extract_directive_arg(statement, "SEARCH_DIR") {
         if !arg.is_empty() {
-            let path = resolve_script_path(script_dir, &arg);
+            let path = resolve_search_dir_path(state, script_dir, &arg);
             let handle = intern_string(path.to_string_lossy().to_string());
             state.search_paths.push(handle);
         }
@@ -3229,11 +3417,9 @@ fn apply_linker_script_statement(
     if let Some(arg) = extract_directive_arg(statement, "INPUT")
         .or_else(|| extract_directive_arg(statement, "GROUP"))
     {
-        for token in tokenize_script_args(&arg) {
-            let path = resolve_script_path(script_dir, &token);
-            state
-                .inputs
-                .push(intern_string(path.to_string_lossy().to_string()));
+        let status = apply_script_input_list(state, script_dir, &arg);
+        if status != ERR_OK {
+            return status;
         }
         return ERR_OK;
     }
@@ -3241,26 +3427,22 @@ fn apply_linker_script_statement(
     if let Some(arg) = extract_directive_arg(statement, "AS_NEEDED") {
         let prior = state.link_as_needed;
         state.link_as_needed = true;
-        for token in tokenize_script_args(&arg) {
-            let path = resolve_script_path(script_dir, &token);
-            state
-                .inputs
-                .push(intern_string(path.to_string_lossy().to_string()));
-        }
+        let status = apply_script_input_list(state, script_dir, &arg);
         state.link_as_needed = prior;
+        if status != ERR_OK {
+            return status;
+        }
         return ERR_OK;
     }
 
     if let Some(arg) = extract_directive_arg(statement, "NO_AS_NEEDED") {
         let prior = state.link_as_needed;
         state.link_as_needed = false;
-        for token in tokenize_script_args(&arg) {
-            let path = resolve_script_path(script_dir, &token);
-            state
-                .inputs
-                .push(intern_string(path.to_string_lossy().to_string()));
-        }
+        let status = apply_script_input_list(state, script_dir, &arg);
         state.link_as_needed = prior;
+        if status != ERR_OK {
+            return status;
+        }
         return ERR_OK;
     }
 
@@ -3283,6 +3465,8 @@ fn apply_linker_script_statement(
         state.image_base = dot_addr;
     } else if let Some(section_addr) = parse_sections_output_address(statement) {
         state.image_base = section_addr;
+    } else if parse_sections_region_assignment(statement).is_some() && state.memory_origin != 0 {
+        state.image_base = state.memory_origin;
     }
 
     ERR_OK
@@ -4133,6 +4317,84 @@ pub extern "C" fn host_linker_get_copy_dt_needed_entries() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_set_hash_style(style: u64) -> u32 {
+    let raw = match read_c_string(style) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let parsed = match parse_hash_style_value(&raw) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.hash_style = parsed;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_hash_style() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.hash_style
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_thread_count(count: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.thread_count = count;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_thread_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.thread_count
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_eh_frame_hdr(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.emit_eh_frame_hdr = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_fatal_warnings(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.fatal_warnings = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_color_diagnostics(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.color_diagnostics = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_print_gc_sections(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.print_gc_sections = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_icf_mode(mode: u32) -> u32 {
+    if mode > ICF_MODE_ALL {
+        return ERR_INVALID_FORMAT;
+    }
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.icf_mode = mode;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_icf_mode() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.icf_mode
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_set_whole_archive(enabled: u32) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.whole_archive = enabled != 0;
@@ -4767,9 +5029,24 @@ pub extern "C" fn host_linker_output_section_count() -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn host_linker_emit_output_section(_output: u64, _section_index: u32) -> u32 {
-    // Sections are emitted in a single pass by the final writer.
-    ERR_OK
+pub extern "C" fn host_linker_emit_output_section(_output: u64, section_index: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let count = if state.output_sections.is_empty() {
+        state
+            .objects
+            .iter()
+            .flat_map(|o| o.sections.iter())
+            .filter(|s| s.flags & SHF_ALLOC != 0)
+            .count() as u32
+    } else {
+        state.output_sections.len() as u32
+    };
+    if section_index >= count {
+        return set_last_error(&mut state, ERR_INVALID_SECTION);
+    }
+    // Final writers still perform complete section materialization; this call now validates the
+    // requested output section stream index.
+    set_last_error(&mut state, ERR_OK)
 }
 
 #[no_mangle]
@@ -4821,39 +5098,14 @@ pub extern "C" fn host_linker_write_flat_binary(output: u64) -> u32 {
     write_all(&path, &bytes)
 }
 
-#[no_mangle]
-pub extern "C" fn host_linker_write_elf_headers(output: u64, entry: u64, image_base: u64) -> u32 {
-    let path = match to_path(output) {
-        Some(p) => p,
-        None => return 10,
-    };
-    ensure_parent(&path);
-    let mut state = linker().lock().expect("linker mutex poisoned");
-    state.pending_elf_entry = entry;
-    state.pending_elf_image_base = image_base;
-    // Prime output with a valid ELF ident immediately.
-    let mut ident = vec![0u8; 64];
-    ident[0] = 0x7f;
-    ident[1] = b'E';
-    ident[2] = b'L';
-    ident[3] = b'F';
-    ident[4] = 2;
-    ident[5] = 1;
-    ident[6] = 1;
-    drop(state);
-    write_all(&path, &ident)
-}
-
-#[no_mangle]
-pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
-    let path = match to_path(output) {
-        Some(p) => p,
-        None => return ERR_WRITE_FAILED,
-    };
-    ensure_parent(&path);
-    let state = linker().lock().expect("linker mutex poisoned");
-    let image = build_flat_image_bytes(&state);
-    let build_id = build_id_payload(&state, &image);
+fn write_elf_output_for_state(
+    path: &Path,
+    state: &LinkerState,
+    entry_override: u64,
+    image_base_override: u64,
+) -> u32 {
+    let image = build_flat_image_bytes(state);
+    let build_id = build_id_payload(state, &image);
     let execstack = state.z_execstack;
     let z_now = state.z_now;
     let new_dtags = state.link_new_dtags;
@@ -4863,12 +5115,16 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
     let et_type = if link_shared || link_pie { ET_DYN } else { ET_EXEC };
     let entry = if link_shared {
         0
+    } else if entry_override != 0 {
+        entry_override
     } else if state.pending_elf_entry != 0 {
         state.pending_elf_entry
     } else {
         state.entry
     };
-    let image_base = if state.pending_elf_image_base != 0 {
+    let image_base = if image_base_override != 0 {
+        image_base_override
+    } else if state.pending_elf_image_base != 0 {
         state.pending_elf_image_base
     } else if et_type == ET_DYN {
         state.image_base
@@ -4912,9 +5168,8 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
     } else {
         Some(runpaths.join(":"))
     };
-    drop(state);
     write_minimal_elf_exec(
-        &path,
+        path,
         entry,
         image_base,
         &image,
@@ -4928,6 +5183,30 @@ pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
         new_dtags,
         z_now,
     )
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_write_elf_headers(output: u64, entry: u64, image_base: u64) -> u32 {
+    let path = match to_path(output) {
+        Some(p) => p,
+        None => return 10,
+    };
+    ensure_parent(&path);
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.pending_elf_entry = entry;
+    state.pending_elf_image_base = image_base;
+    write_elf_output_for_state(&path, &state, entry, image_base)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_finalize_elf(output: u64) -> u32 {
+    let path = match to_path(output) {
+        Some(p) => p,
+        None => return ERR_WRITE_FAILED,
+    };
+    ensure_parent(&path);
+    let state = linker().lock().expect("linker mutex poisoned");
+    write_elf_output_for_state(&path, &state, 0, 0)
 }
 
 #[no_mangle]

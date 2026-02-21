@@ -20,6 +20,9 @@
 - host runtime shim grew linker-oriented intrinsics used by Dust-built `dustlink`
 - host runtime shim shared-symbol ingestion now includes ELF, PE, COFF, and Mach-O metadata paths
 - linker-script application now uses block-aware statement splitting and additional `SECTIONS`/`ENTRY(symbol)` semantics used by dustlink parity work
+- linker-script runtime semantics now include sysroot-aware `SEARCH_DIR(=...)` handling and `INPUT` support for `-L` search-path tokens / `-l` needed-library token capture
+- compatibility CLI controls in host linker runtime now carry explicit state for hash-style, thread count, eh-frame-header, diagnostics toggles, print-gc toggles, and icf mode
+- ELF write path no longer primes output with ident-only stubs during staged emission; header/finalize stages both execute complete ELF writer flow with section-index validation on staged section calls
 
 ## Important Mismatches to Track
 
