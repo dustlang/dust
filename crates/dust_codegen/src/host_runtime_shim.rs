@@ -1,7 +1,7 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -138,6 +138,8 @@ struct LinkerState {
     image_size: u32,
     active_patch_object: Option<u32>,
     strip_debug: bool,
+    gc_sections: bool,
+    allow_multiple_definition: bool,
     pending_elf_entry: u64,
     pending_elf_image_base: u64,
     extracted_members: Vec<PathBuf>,
@@ -417,11 +419,66 @@ fn symbol_name_hash_from_strtab(
 }
 
 fn build_alloc_segments(state: &LinkerState) -> Vec<(u64, Vec<u8>, u32, u32)> {
+    let mut referenced: HashSet<(u32, u32)> = HashSet::new();
+    if state.gc_sections {
+        for (obj_idx, object) in state.objects.iter().enumerate() {
+            for reloc in &object.relocations {
+                referenced.insert((obj_idx as u32, reloc.section));
+                if let Some(symbol) = object.symbols.get(reloc.symbol as usize) {
+                    if symbol.shndx != SHN_UNDEF && symbol.shndx != SHN_ABS {
+                        referenced.insert((obj_idx as u32, symbol.shndx as u32));
+                    }
+                }
+            }
+        }
+
+        for global in state.globals.values() {
+            if global.defined == 1 {
+                if let Some(object) = state.objects.get(global.object_index as usize) {
+                    if let Some(symbol) = object.symbols.get(global.symbol_index as usize) {
+                        if symbol.shndx != SHN_UNDEF && symbol.shndx != SHN_ABS {
+                            referenced.insert((global.object_index, symbol.shndx as u32));
+                        }
+                    }
+                }
+            }
+        }
+
+        if state.entry != 0 {
+            for (obj_idx, object) in state.objects.iter().enumerate() {
+                for (sym_idx, symbol) in object.symbols.iter().enumerate() {
+                    if symbol.shndx == SHN_UNDEF || symbol.shndx == SHN_ABS {
+                        continue;
+                    }
+                    let addr = symbol_runtime_address(state, obj_idx as u32, sym_idx as u32);
+                    if addr == state.entry {
+                        referenced.insert((obj_idx as u32, symbol.shndx as u32));
+                    }
+                }
+            }
+        }
+    }
+
     let mut out = Vec::new();
     for (obj_idx, object) in state.objects.iter().enumerate() {
+        let first_alloc = object
+            .sections
+            .iter()
+            .find(|section| section.flags & SHF_ALLOC != 0)
+            .map(|section| section.index);
         for section in &object.sections {
             if section.flags & SHF_ALLOC == 0 {
                 continue;
+            }
+            if state.gc_sections {
+                let key = (obj_idx as u32, section.index);
+                let keep =
+                    referenced.contains(&key)
+                        || (section.flags & SHF_EXECINSTR != 0)
+                        || first_alloc == Some(section.index);
+                if !keep {
+                    continue;
+                }
             }
             let addr = build_section_runtime_address(state, obj_idx as u32, section.index);
             let mut bytes = section.data.clone();
@@ -616,6 +673,20 @@ fn parse_u64_auto(text: &str) -> Option<u64> {
         return u64::from_str_radix(oct, 8).ok();
     }
     raw.parse::<u64>().ok()
+}
+
+fn parse_defsym_spec(text: &str) -> Option<(u64, u64)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (name_raw, value_raw) = trimmed.split_once('=')?;
+    let name = name_raw.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let value = parse_u64_auto(value_raw.trim())?;
+    Some((fnv1a64(name), value))
 }
 
 fn probe_object_format_bytes(raw: &[u8]) -> u32 {
@@ -1714,6 +1785,63 @@ pub extern "C" fn host_linker_set_image_base(base: u64) -> u32 {
 pub extern "C" fn host_linker_get_image_base() -> u64 {
     let state = linker().lock().expect("linker mutex poisoned");
     state.image_base
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_gc_sections(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.gc_sections = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_gc_sections() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.gc_sections { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_allow_multiple_definition(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.allow_multiple_definition = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_allow_multiple_definition() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.allow_multiple_definition { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_apply_defsym(spec: u64) -> u32 {
+    let text = match read_c_string(spec) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let (name_hash, value) = match parse_defsym_spec(&text) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    if !state.allow_multiple_definition {
+        if let Some(existing) = state.globals.get(&name_hash) {
+            if existing.defined == 1 {
+                return set_last_error(&mut state, ERR_MULTIPLE_DEFINITION);
+            }
+        }
+    }
+    state.globals.insert(
+        name_hash,
+        GlobalSymbol {
+            object_index: 0,
+            symbol_index: 0,
+            bind: 1,
+            defined: 1,
+            address: value,
+        },
+    );
+    set_last_error(&mut state, ERR_OK)
 }
 
 #[no_mangle]
