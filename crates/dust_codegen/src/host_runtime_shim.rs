@@ -34,10 +34,12 @@ const SHN_ABS: u16 = 65521;
 const SHF_ALLOC: u64 = 0x2;
 const SHF_WRITE: u64 = 0x1;
 const SHF_EXECINSTR: u64 = 0x4;
+const SHF_TLS: u64 = 0x400;
 const SHT_NOBITS: u32 = 8;
 const SHT_PROGBITS: u32 = 1;
 const SHT_DYNAMIC: u32 = 6;
 const SHT_DYNSYM: u32 = 11;
+const STT_TLS: u8 = 6;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
@@ -110,6 +112,9 @@ const R_AARCH64_NONE: u32 = 0;
 const R_AARCH64_ABS64: u32 = 257;
 const R_AARCH64_ABS32: u32 = 258;
 const R_AARCH64_PREL32: u32 = 261;
+const R_AARCH64_TLS_DTPMOD: u32 = 1028;
+const R_AARCH64_TLS_DTPREL: u32 = 1029;
+const R_AARCH64_TLS_TPREL: u32 = 1030;
 
 const STORAGE_CLASS_EXTERNAL: u8 = 2;
 const STORAGE_CLASS_STATIC: u8 = 3;
@@ -935,6 +940,88 @@ fn symbol_runtime_address(state: &LinkerState, object_index: u32, symbol_index: 
     }
     let sec_addr = build_section_runtime_address(state, object_index, symbol.shndx as u32);
     sec_addr.saturating_add(symbol.value)
+}
+
+fn build_tls_section_offset(state: &LinkerState, object_index: u32, section_index: u32) -> Option<u64> {
+    let mut cursor = 0u64;
+    for (obj_idx, object) in state.objects.iter().enumerate() {
+        for section in &object.sections {
+            if section.flags & SHF_ALLOC == 0 || section.flags & SHF_TLS == 0 {
+                continue;
+            }
+            cursor = align_up(cursor, section.align.max(1));
+            if obj_idx as u32 == object_index && section.index == section_index {
+                return Some(cursor);
+            }
+            let sec_size = section.size.max(section.data.len() as u64);
+            cursor = cursor.saturating_add(sec_size);
+        }
+    }
+    None
+}
+
+fn tls_symbol_offset_inner(
+    state: &LinkerState,
+    object_index: u32,
+    symbol_index: u32,
+    depth: u8,
+) -> Result<u64, u32> {
+    if depth > 2 {
+        return Err(ERR_INVALID_RELOCATION);
+    }
+    let object = state
+        .objects
+        .get(object_index as usize)
+        .ok_or(ERR_INVALID_RELOCATION)?;
+    let symbol = object
+        .symbols
+        .get(symbol_index as usize)
+        .ok_or(ERR_INVALID_RELOCATION)?;
+    if symbol.shndx == SHN_UNDEF {
+        if symbol.name_hash == 0 {
+            return Err(ERR_UNDEFINED_SYMBOL);
+        }
+        let global = state.globals.get(&symbol.name_hash).ok_or(ERR_UNDEFINED_SYMBOL)?;
+        if global.defined != 1 {
+            return Err(ERR_UNDEFINED_SYMBOL);
+        }
+        return tls_symbol_offset_inner(state, global.object_index, global.symbol_index, depth + 1);
+    }
+    if symbol.shndx == SHN_ABS {
+        return Err(ERR_INVALID_RELOCATION);
+    }
+    let section_index = symbol.shndx as u32;
+    let section = object
+        .sections
+        .iter()
+        .find(|s| s.index == section_index)
+        .ok_or(ERR_INVALID_SECTION)?;
+    if (section.flags & SHF_TLS == 0) && symbol.sym_type != STT_TLS {
+        return Err(ERR_INVALID_RELOCATION);
+    }
+    let base = build_tls_section_offset(state, object_index, section_index).ok_or(ERR_INVALID_SECTION)?;
+    Ok(base.wrapping_add(symbol.value))
+}
+
+fn aarch64_tls_data_reloc_value(
+    state: &LinkerState,
+    object_index: u32,
+    symbol_index: u32,
+    reloc_type: u32,
+    addend: u64,
+) -> Result<u64, u32> {
+    if state.link_shared {
+        return Err(ERR_NOT_IMPLEMENTED_YET);
+    }
+    match reloc_type {
+        R_AARCH64_TLS_DTPMOD => Ok(1),
+        R_AARCH64_TLS_DTPREL | R_AARCH64_TLS_TPREL => {
+            let offset = tls_symbol_offset_inner(state, object_index, symbol_index, 0)?;
+            // Deterministic host-link TLS model: zero-bias data/TP offsets within the synthesized TLS block.
+            Ok(offset.wrapping_add(addend))
+        }
+        _ => Err(ERR_INVALID_RELOCATION),
+    }
 }
 
 fn section_payload_from_object(path: u64, section_type: u32, offset: u64, size: u64) -> Option<Vec<u8>> {
@@ -3400,8 +3487,8 @@ fn ingest_shared_object_symbols(state: &mut LinkerState, path: &Path) -> u32 {
         OBJECT_FORMAT_ELF64 => ingest_shared_elf_symbols(state, &raw),
         OBJECT_FORMAT_COFF64 => ingest_shared_coff_symbols(state, &raw),
         OBJECT_FORMAT_MACHO64 => ingest_shared_macho_symbols(state, &raw),
-        OBJECT_FORMAT_UNKNOWN => ERR_OK,
-        _ => ERR_OK,
+        OBJECT_FORMAT_UNKNOWN => ERR_INVALID_FORMAT,
+        _ => ERR_INVALID_FORMAT,
     }
 }
 
@@ -6333,6 +6420,27 @@ pub extern "C" fn host_linker_weak_fallback_count() -> u32 {
 pub extern "C" fn host_linker_resolved_symbol_address(object_index: u32, symbol_index: u32) -> u64 {
     let state = linker().lock().expect("linker mutex poisoned");
     symbol_runtime_address(&state, object_index, symbol_index)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_aarch64_tls_data_reloc_value(
+    object_index: u32,
+    symbol_index: u32,
+    reloc_type: u32,
+    addend: u64,
+) -> u64 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let result = aarch64_tls_data_reloc_value(&state, object_index, symbol_index, reloc_type, addend);
+    match result {
+        Ok(v) => {
+            set_last_error(&mut state, ERR_OK);
+            v
+        }
+        Err(code) => {
+            set_last_error(&mut state, code);
+            0
+        }
+    }
 }
 
 #[no_mangle]

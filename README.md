@@ -47,7 +47,10 @@ This repository contains:
   - expanded AArch64 relocation support in Dust linker relocation pipeline:
     - branch/instruction forms (`CALL26`, `JUMP26`, `CONDBR19`, `TSTBR14`, `LD_PREL_LO19`, `ADR_PREL_LO21`, `ADRP` page relocs, `ADD/LDST` lo12 patching including `LDST128`)
     - MOVW families (`UABS`, `SABS`, `PREL`)
-    - starter TLS relocation families (`TLSGD`, `TLSLD`, `TLSDESC` instruction forms and `TLS_DTPMOD` / `TLS_DTPREL` / `TLS_TPREL` data relocs)
+    - starter TLS relocation families:
+      - instruction/descriptor forms (`TLSGD`, `TLSLD`, `TLSDESC`) recognized/validated with strict `ERR_NOT_IMPLEMENTED_YET` application for unsupported TLS descriptor semantics
+      - data relocs (`TLS_DTPMOD` / `TLS_DTPREL` / `TLS_TPREL`) use host-runtime TLS layout metadata helpers for non-shared links
+  - host runtime shared-object symbol ingest now returns `ERR_INVALID_FORMAT` for unknown/unsupported shared object payloads (no silent success on unknown format)
   - architecture-correct output header stamping in ELF/PE/Mach-O writers based on resolved target
   - real PE compatibility-state wiring for `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, `/LARGEADDRESSAWARE`
   - broader soft-compatibility handling for common ld/lld/lld-link metadata/profiling flag families (`--warn-*`, `--time-trace*`, `--lto-*`, `/GUARD:*`, `/TIMESTAMP:*`, `/MERGE:*`, `/SECTION:*`)

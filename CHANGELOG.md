@@ -110,7 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - host runtime shim / Dust linker parity coverage expanded for AArch64 ELF instruction relocations:
     - branch/literal/ADR/ADRP/ADD/LDST (including `LDST128`) bitfield patching
     - MOVW `UABS` / `SABS` / `PREL` families
-    - starter TLS instruction-form relocations (`TLSGD`, `TLSLD`, `TLSDESC`) plus AArch64 TLS data relocs (`TLS_DTPMOD`, `TLS_DTPREL`, `TLS_TPREL`)
+    - starter TLS instruction-form relocation ID support (`TLSGD`, `TLSLD`, `TLSDESC`) with strict unsupported apply-path handling for non-implemented descriptor semantics
+    - host-runtime-backed AArch64 TLS data relocation values for `TLS_DTPMOD`, `TLS_DTPREL`, and `TLS_TPREL` in non-shared links using deterministic TLS layout metadata
+  - host runtime shared-object ingestion now returns `ERR_INVALID_FORMAT` for unknown/unsupported shared-object payloads instead of silently succeeding
 
 ### Changed
 

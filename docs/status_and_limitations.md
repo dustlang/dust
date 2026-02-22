@@ -36,6 +36,7 @@
   - `ADD_ABS_LO12_NC` and `LDST*_ABS_LO12_NC` (including `LDST128`)
   - MOVW `UABS` / `SABS` / `PREL` families
   - starter TLS instruction/data relocations for `TLSGD` / `TLSLD` / `TLSDESC` plus `TLS_DTPMOD` / `TLS_DTPREL` / `TLS_TPREL`
+- host linker runtime now computes AArch64 TLS data relocation values (`TLS_DTPMOD`, `TLS_DTPREL`, `TLS_TPREL`) for non-shared links using a deterministic synthesized TLS layout derived from object TLS sections
 - host linker output writers now emit architecture-correct machine/cpu identifiers for ELF/PE/Mach-O outputs
 - host linker PE output now applies `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, and `/LARGEADDRESSAWARE` to emitted header fields (entrypoint/characteristics)
 - host linker compatibility handling now includes broader soft-compatibility ld/lld/lld-link families (`--warn-*`, `--time-trace*`, `--lto-*`, `/GUARD:*`, `/TIMESTAMP:*`, `/MERGE:*`, `/SECTION:*`)
@@ -53,7 +54,8 @@
   - `--emit-relocs` (map-row relocation reporting)
   - `--print-gc-sections` (GC drop diagnostics)
 - host object ingestion now uses refined machine-aware COFF and Mach-O relocation-kind mapping during relocation record ingestion
-- full AArch64 ELF TLS descriptor dynamic semantics are not complete yet (current coverage focuses on ingest/validation/bitfield patching and starter relocation plumbing, not exhaustive dynamic TLS linker behavior parity)
+- full AArch64 ELF TLS descriptor / TLS instruction-family semantics are not complete yet (current coverage includes ingest/validation, bitfield patching for non-TLS instruction forms, and host-backed TLS data reloc math, but not exhaustive TLSDESC/GOT/TLS relaxation behavior parity)
+- shared-object handling remains primarily symbol-ingest oriented rather than full dynamic-linker semantic parity (though unknown shared-object formats now fail instead of silently succeeding)
 
 ## Important Mismatches to Track
 
