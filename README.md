@@ -44,6 +44,10 @@ This repository contains:
   - machine-aware relocation validation/application paths keyed by object machine type
   - refined COFF and Mach-O relocation-kind mapping during host object ingestion (machine-aware COFF mapping and Mach-O reloc-type decoding)
   - baseline AArch64 relocation support in Dust linker relocation pipeline (`R_AARCH64_NONE`, `R_AARCH64_ABS64`, `R_AARCH64_ABS32`, `R_AARCH64_PREL32`)
+  - expanded AArch64 relocation support in Dust linker relocation pipeline:
+    - branch/instruction forms (`CALL26`, `JUMP26`, `CONDBR19`, `TSTBR14`, `LD_PREL_LO19`, `ADR_PREL_LO21`, `ADRP` page relocs, `ADD/LDST` lo12 patching including `LDST128`)
+    - MOVW families (`UABS`, `SABS`, `PREL`)
+    - starter TLS relocation families (`TLSGD`, `TLSLD`, `TLSDESC` instruction forms and `TLS_DTPMOD` / `TLS_DTPREL` / `TLS_TPREL` data relocs)
   - architecture-correct output header stamping in ELF/PE/Mach-O writers based on resolved target
   - real PE compatibility-state wiring for `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, `/LARGEADDRESSAWARE`
   - broader soft-compatibility handling for common ld/lld/lld-link metadata/profiling flag families (`--warn-*`, `--time-trace*`, `--lto-*`, `/GUARD:*`, `/TIMESTAMP:*`, `/MERGE:*`, `/SECTION:*`)

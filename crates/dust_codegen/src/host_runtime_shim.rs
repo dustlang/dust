@@ -6363,6 +6363,39 @@ pub extern "C" fn host_linker_patch_u32(section_index: u32, offset: u64, value: 
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_read_u32(section_index: u32, offset: u64) -> u64 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let object_index = state.active_patch_object.unwrap_or(0) as usize;
+    let object = match state.objects.get(object_index) {
+        Some(v) => v,
+        None => {
+            set_last_error(&mut state, ERR_INVALID_RELOCATION);
+            return 0;
+        }
+    };
+    let section = match object.sections.iter().find(|s| s.index == section_index) {
+        Some(v) => v,
+        None => {
+            set_last_error(&mut state, ERR_INVALID_SECTION);
+            return 0;
+        }
+    };
+    let at = offset as usize;
+    if at + 4 > section.data.len() {
+        set_last_error(&mut state, ERR_INVALID_RELOCATION);
+        return 0;
+    }
+    let value = u32::from_le_bytes([
+        section.data[at],
+        section.data[at + 1],
+        section.data[at + 2],
+        section.data[at + 3],
+    ]) as u64;
+    set_last_error(&mut state, ERR_OK);
+    value
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_patch_u64(section_index: u32, offset: u64, value: u64) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     let object_index = state.active_patch_object.unwrap_or(0) as usize;

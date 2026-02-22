@@ -29,6 +29,13 @@
 - host linker target modeling now preserves architecture-specific targets (`x86_64` vs `aarch64`) instead of collapsing all aliases into x86_64-only families
 - host linker relocation ingest/application now branches on per-object machine type, enabling machine-aware relocation validation and patch rules
 - host linker relocation baseline now includes AArch64 IDs (`R_AARCH64_NONE`, `R_AARCH64_ABS64`, `R_AARCH64_ABS32`, `R_AARCH64_PREL32`)
+- host linker relocation AArch64 coverage now includes instruction-form patching and validation for:
+  - `CALL26` / `JUMP26`
+  - `CONDBR19` / `TSTBR14`
+  - `LD_PREL_LO19`, `ADR_PREL_LO21`, `ADR_PREL_PG_HI21(_NC)`
+  - `ADD_ABS_LO12_NC` and `LDST*_ABS_LO12_NC` (including `LDST128`)
+  - MOVW `UABS` / `SABS` / `PREL` families
+  - starter TLS instruction/data relocations for `TLSGD` / `TLSLD` / `TLSDESC` plus `TLS_DTPMOD` / `TLS_DTPREL` / `TLS_TPREL`
 - host linker output writers now emit architecture-correct machine/cpu identifiers for ELF/PE/Mach-O outputs
 - host linker PE output now applies `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, and `/LARGEADDRESSAWARE` to emitted header fields (entrypoint/characteristics)
 - host linker compatibility handling now includes broader soft-compatibility ld/lld/lld-link families (`--warn-*`, `--time-trace*`, `--lto-*`, `/GUARD:*`, `/TIMESTAMP:*`, `/MERGE:*`, `/SECTION:*`)
@@ -46,6 +53,7 @@
   - `--emit-relocs` (map-row relocation reporting)
   - `--print-gc-sections` (GC drop diagnostics)
 - host object ingestion now uses refined machine-aware COFF and Mach-O relocation-kind mapping during relocation record ingestion
+- full AArch64 ELF TLS descriptor dynamic semantics are not complete yet (current coverage focuses on ingest/validation/bitfield patching and starter relocation plumbing, not exhaustive dynamic TLS linker behavior parity)
 
 ## Important Mismatches to Track
 

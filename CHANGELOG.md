@@ -107,6 +107,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ELF writer now consumes `--hash-style` state to emit hash-table dynamic tags (`DT_HASH`, `DT_GNU_HASH`) in generated ELF outputs
   - host object ingestion uses refined machine-aware relocation mapping for COFF and Mach-O relocation records
   - target alias parsing expanded for musl triples, Windows GNU triples, and `*-none[-elf]` bare-metal aliases used by Dust-built tools
+  - host runtime shim / Dust linker parity coverage expanded for AArch64 ELF instruction relocations:
+    - branch/literal/ADR/ADRP/ADD/LDST (including `LDST128`) bitfield patching
+    - MOVW `UABS` / `SABS` / `PREL` families
+    - starter TLS instruction-form relocations (`TLSGD`, `TLSLD`, `TLSDESC`) plus AArch64 TLS data relocs (`TLS_DTPMOD`, `TLS_DTPREL`, `TLS_TPREL`)
 
 ### Changed
 
@@ -122,6 +126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Code generation for complex control flow
 - Host linker-script runtime no longer silently accepts unknown linker-script directives.
 - Host linker compatibility/no-op flag handling now surfaces diagnostics instead of silent acceptance.
+- Dust-built linker relocation parsing/validation now accepts and processes a broader AArch64 ELF relocation set (including MOVW and TLS starter forms) instead of rejecting them during ingest.
 
 ## [0.1.0] - 2026-02-12
 
