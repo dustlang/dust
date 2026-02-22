@@ -921,6 +921,13 @@ fn symbol_runtime_address(state: &LinkerState, object_index: u32, symbol_index: 
         None => return 0,
     };
     if symbol.shndx == SHN_UNDEF {
+        if symbol.name_hash != 0 {
+            if let Some(global) = state.globals.get(&symbol.name_hash) {
+                if global.defined == 1 {
+                    return global.address;
+                }
+            }
+        }
         return 0;
     }
     if symbol.shndx == SHN_ABS {
