@@ -94,6 +94,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ELF writer flow now emits a complete executable during header/finalize stages (instead of ident-only priming), and output-section stream calls validate section-index bounds
   - PE and Mach-O host writers now emit sectionized images from alloc chunks rather than single synthetic text payload sections
   - parity-oriented relocation/machine support surfaced to Dust linker modules (including additional x86_64 relocation IDs and ELF `EM_AARCH64` acceptance in validator paths)
+  - architecture-aware target identity is preserved end-to-end (`x86_64` vs `aarch64`) instead of collapsing all targets into x86_64 families
+  - ELF/PE/Mach-O host writers now stamp architecture-correct machine/cpu fields based on resolved linker target
+  - host runtime relocation pipeline is machine-aware per object via `host_linker_object_machine`
+  - baseline AArch64 relocation handling is available in Dust linker relocation logic (`R_AARCH64_NONE`, `R_AARCH64_ABS64`, `R_AARCH64_ABS32`, `R_AARCH64_PREL32`)
+  - `lld-link` compatibility toggles `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, and `/LARGEADDRESSAWARE` are state-wired into PE header emission behavior
+  - host CLI compatibility coverage expanded with soft-compatibility families for common ld/lld/lld-link metadata/profiling options (`--warn-*`, `--time-trace*`, `--lto-*`, `/GUARD:*`, `/TIMESTAMP:*`, `/MERGE:*`, `/SECTION:*`, etc.)
+  - linker-script expression evaluator now covers unary, multiplicative, shift, and bitwise operators in addition to existing additive/script builtins
+  - linker-script parsing now supports direct symbol assignments (`SYMBOL = <expr>`) and rejects unknown directive heads instead of silently accepting them
+  - linker-script `OUTPUT_FORMAT`, `TARGET`, and `OUTPUT_ARCH` directives now return invalid/unsupported errors for bad values instead of silently succeeding
+  - host runtime shim now exposes/consumes parity state for `fatal-warnings`, `color-diagnostics`, `print-gc-sections`, `--dependency-file`, and `--emit-relocs`
+  - ELF writer now consumes `--hash-style` state to emit hash-table dynamic tags (`DT_HASH`, `DT_GNU_HASH`) in generated ELF outputs
+  - host object ingestion uses refined machine-aware relocation mapping for COFF and Mach-O relocation records
+  - target alias parsing expanded for musl triples, Windows GNU triples, and `*-none[-elf]` bare-metal aliases used by Dust-built tools
 
 ### Changed
 
@@ -107,6 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Memory safety issues in generated code
 - Type inference edge cases
 - Code generation for complex control flow
+- Host linker-script runtime no longer silently accepts unknown linker-script directives.
+- Host linker compatibility/no-op flag handling now surfaces diagnostics instead of silent acceptance.
 
 ## [0.1.0] - 2026-02-12
 

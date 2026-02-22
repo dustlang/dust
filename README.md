@@ -25,17 +25,28 @@ This repository contains:
   - COFF/Mach-O object-format probe and symbol-ingest acceptance for `arm64` machine/cpu IDs in addition to `x86_64`
   - block-aware linker-script statement splitting
   - section output-address parsing inside `SECTIONS { ... }`
-  - script expression evaluation (`ORIGIN/LENGTH/ADDR/LOADADDR/SIZEOF/ALIGN` + `+/-`) and `ASSERT(...)` checks
+  - script expression evaluation (`ORIGIN/LENGTH/ADDR/LOADADDR/SIZEOF/ALIGN`, unary ops, `+/-`, `*`, `/`, `%`, shifts, bitwise ops) and `ASSERT(...)` checks
+  - strict script handling for unknown directive heads plus direct symbol-assignment statements (`SYMBOL = <expr>`)
   - `PHDRS` / `VERSION` script compatibility blocks with block-shape validation
   - `SECTIONS ... AT(<expr>)` load-address capture
   - required-symbol registration for `ENTRY(symbol)` script form
   - sysroot-aware `SEARCH_DIR(=...)` linker-script resolution and script `INPUT` handling for `-L` / `-l` tokens
   - compatibility-flag state wiring for hash-style/threading/diagnostic/icf controls
+  - runtime consumption of compatibility-state fields for hash-style ELF dynamic tags, `--dependency-file` depfile emission, `--emit-relocs` map-row expansion, and `--print-gc-sections` drop diagnostics
   - broader CLI compatibility handling for script/export-related ld/lld flags (`--version-script`, `--dynamic-list`, `--trace-symbol`, `--print-map`, `--start-lib`, `--end-lib`)
+  - non-silent compatibility no-op handling in Dust-built `dustlink` CLI paths (warning diagnostics, or hard-fail under fatal-warnings mode)
+  - improved unsupported flag/target diagnostics for host linker CLI parsing
   - dynamic-policy alias handling for `--no-allow-shlib-undefined`
   - expanded `-z` semantic handling for `defs`/`undefs` plus accepted compatibility tokens `text`/`notext`/`origin`
   - `lld-link` slash-option compatibility handling (`/OUT`, `/ENTRY`, `/MACHINE`, `/LIBPATH`, `/DEFAULTLIB`, `/MAP`, `/DLL`, `/SUBSYSTEM`, `/OPT`, `/WX`, `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, `/LARGEADDRESSAWARE`)
-  - additional target alias parsing for `aarch64`/`arm64` triples (mapped to platform linker target families)
+  - additional target alias parsing for `aarch64`/`arm64` triples (mapped to platform linker target families), musl triples, Windows GNU triples, and bare-metal `*-none[-elf]` aliases
+  - architecture-aware target preservation for both `x86_64` and `aarch64` host linker target IDs
+  - machine-aware relocation validation/application paths keyed by object machine type
+  - refined COFF and Mach-O relocation-kind mapping during host object ingestion (machine-aware COFF mapping and Mach-O reloc-type decoding)
+  - baseline AArch64 relocation support in Dust linker relocation pipeline (`R_AARCH64_NONE`, `R_AARCH64_ABS64`, `R_AARCH64_ABS32`, `R_AARCH64_PREL32`)
+  - architecture-correct output header stamping in ELF/PE/Mach-O writers based on resolved target
+  - real PE compatibility-state wiring for `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, `/LARGEADDRESSAWARE`
+  - broader soft-compatibility handling for common ld/lld/lld-link metadata/profiling flag families (`--warn-*`, `--time-trace*`, `--lto-*`, `/GUARD:*`, `/TIMESTAMP:*`, `/MERGE:*`, `/SECTION:*`)
   - complete ELF writer execution in staged header/finalize flow (no ident-only prewrite)
   - sectionized PE/Mach-O host writer emission from real alloc chunks
 

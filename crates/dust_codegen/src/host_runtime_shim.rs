@@ -48,12 +48,14 @@ const ET_DYN: u16 = 3;
 const EV_CURRENT: u32 = 1;
 const DT_NULL: u64 = 0;
 const DT_NEEDED: u64 = 1;
+const DT_HASH: u64 = 4;
 const DT_STRTAB: u64 = 5;
 const DT_STRSZ: u64 = 10;
 const DT_SONAME: u64 = 14;
 const DT_RPATH: u64 = 15;
 const DT_RUNPATH: u64 = 29;
 const DT_FLAGS: u64 = 30;
+const DT_GNU_HASH: u64 = 0x6fff_fef5;
 const DF_BIND_NOW: u64 = 0x8;
 
 const FORMAT_ELF64: u32 = 1;
@@ -62,10 +64,14 @@ const FORMAT_MBR: u32 = 3;
 const FORMAT_PE64: u32 = 4;
 const FORMAT_MACHO64: u32 = 5;
 
+const TARGET_NONE: u32 = 0;
 const TARGET_X86_64_NONE: u32 = 0;
 const TARGET_X86_64_LINUX: u32 = 1;
 const TARGET_X86_64_WINDOWS: u32 = 2;
 const TARGET_X86_64_MACOS: u32 = 3;
+const TARGET_AARCH64_LINUX: u32 = 4;
+const TARGET_AARCH64_WINDOWS: u32 = 5;
+const TARGET_AARCH64_MACOS: u32 = 6;
 
 const BUILD_ID_MODE_NONE: u32 = 0;
 const BUILD_ID_MODE_FAST: u32 = 1;
@@ -89,9 +95,21 @@ const OBJECT_FORMAT_COFF64: u32 = 2;
 const OBJECT_FORMAT_MACHO64: u32 = 3;
 
 const COFF_MACHINE_X86_64: u16 = 0x8664;
+const COFF_MACHINE_X86: u16 = 0x14c;
 const COFF_MACHINE_AARCH64: u16 = 0xaa64;
 const MACH_CPU_X86_64: u32 = 0x0100_0007;
 const MACH_CPU_ARM64: u32 = 0x0100_000c;
+
+const R_X86_64_NONE: u32 = 0;
+const R_X86_64_64: u32 = 1;
+const R_X86_64_PC32: u32 = 2;
+const R_X86_64_32: u32 = 10;
+const R_X86_64_32S: u32 = 11;
+const R_X86_64_GOTPCREL: u32 = 9;
+const R_AARCH64_NONE: u32 = 0;
+const R_AARCH64_ABS64: u32 = 257;
+const R_AARCH64_ABS32: u32 = 258;
+const R_AARCH64_PREL32: u32 = 261;
 
 const STORAGE_CLASS_EXTERNAL: u8 = 2;
 const STORAGE_CLASS_STATIC: u8 = 3;
@@ -216,6 +234,12 @@ struct LinkerState {
     color_diagnostics: bool,
     print_gc_sections: bool,
     icf_mode: u32,
+    pe_no_entry: bool,
+    pe_dynamic_base: bool,
+    pe_nx_compat: bool,
+    pe_large_address_aware: bool,
+    dependency_file: u64,
+    emit_relocs: bool,
 }
 
 static STRINGS: OnceLock<Mutex<Vec<CString>>> = OnceLock::new();
@@ -292,10 +316,50 @@ fn push_unique_search_path(paths: &mut Vec<String>, path: String) {
     }
 }
 
+fn target_is_windows(target: u32) -> bool {
+    target == TARGET_X86_64_WINDOWS || target == TARGET_AARCH64_WINDOWS
+}
+
+fn target_is_macos(target: u32) -> bool {
+    target == TARGET_X86_64_MACOS || target == TARGET_AARCH64_MACOS
+}
+
+fn target_is_linux(target: u32) -> bool {
+    target == TARGET_X86_64_LINUX || target == TARGET_AARCH64_LINUX || target == TARGET_NONE
+}
+
+fn target_is_aarch64(target: u32) -> bool {
+    target == TARGET_AARCH64_LINUX || target == TARGET_AARCH64_WINDOWS || target == TARGET_AARCH64_MACOS
+}
+
+fn target_elf_machine(target: u32) -> u16 {
+    if target_is_aarch64(target) {
+        EM_AARCH64
+    } else {
+        EM_X86_64
+    }
+}
+
+fn target_pe_machine(target: u32) -> u16 {
+    if target == TARGET_AARCH64_WINDOWS {
+        COFF_MACHINE_AARCH64
+    } else {
+        COFF_MACHINE_X86_64
+    }
+}
+
+fn target_macho_cpu_type(target: u32) -> (u32, u32) {
+    if target == TARGET_AARCH64_MACOS {
+        (MACH_CPU_ARM64, 0)
+    } else {
+        (MACH_CPU_X86_64, 3)
+    }
+}
+
 fn linker_default_search_paths(target: u32, sysroot: Option<&Path>) -> Vec<String> {
-    let suffixes: &[&str] = if target == TARGET_X86_64_WINDOWS {
+    let suffixes: &[&str] = if target_is_windows(target) {
         &["lib", "lib64", "usr/lib", "usr/lib64"]
-    } else if target == TARGET_X86_64_MACOS {
+    } else if target_is_macos(target) {
         &["usr/lib", "usr/local/lib", "lib"]
     } else {
         &["lib64", "usr/lib64", "lib", "usr/lib", "usr/local/lib"]
@@ -317,7 +381,7 @@ fn linker_default_search_paths(target: u32, sysroot: Option<&Path>) -> Vec<Strin
         }
     }
 
-    if target == TARGET_X86_64_WINDOWS && sysroot.is_none() {
+    if target_is_windows(target) && sysroot.is_none() {
         push_unique_search_path(&mut out, "C:\\Windows\\System32".to_string());
         push_unique_search_path(&mut out, "C:\\Windows".to_string());
         push_unique_search_path(&mut out, ".".to_string());
@@ -969,6 +1033,12 @@ fn build_alloc_segments(state: &LinkerState) -> Vec<(u64, Vec<u8>, u32, u32)> {
                         || (section.flags & SHF_EXECINSTR != 0)
                         || first_alloc == Some(section.index);
                 if !keep {
+                    if state.print_gc_sections {
+                        eprintln!(
+                            "dustlink: gc-sections dropped obj={} sec={} flags=0x{:x}",
+                            obj_idx, section.index, section.flags
+                        );
+                    }
                     continue;
                 }
             }
@@ -1060,12 +1130,14 @@ fn write_minimal_elf_exec(
     build_id: &[u8],
     execstack: bool,
     et_type: u16,
+    machine: u16,
     interp_path: Option<&str>,
     soname: Option<&str>,
     needed_libs: &[String],
     runpath: Option<&str>,
     use_new_dtags: bool,
     z_now: bool,
+    hash_style: u32,
 ) -> u32 {
     let phoff = 64usize;
 
@@ -1137,6 +1209,12 @@ fn write_minimal_elf_exec(
         }
         // DT_STRTAB patched after layout is known.
         dynamic_entries.push((DT_STRTAB, 0));
+        if hash_style == HASH_STYLE_SYSV || hash_style == HASH_STYLE_BOTH {
+            dynamic_entries.push((DT_HASH, 0));
+        }
+        if hash_style == HASH_STYLE_GNU || hash_style == HASH_STYLE_BOTH {
+            dynamic_entries.push((DT_GNU_HASH, 0));
+        }
         dynamic_entries.push((DT_STRSZ, dynstr.len() as u64));
         if z_now {
             dynamic_entries.push((DT_FLAGS, DF_BIND_NOW));
@@ -1179,11 +1257,37 @@ fn write_minimal_elf_exec(
     let mut dynamic_size = 0usize;
     let mut dynstr_offset = 0usize;
     let mut dynstr_end = payload_end;
+    let mut sysv_hash_offset = 0usize;
+    let mut gnu_hash_offset = 0usize;
+    let include_sysv_hash = hash_style == HASH_STYLE_SYSV || hash_style == HASH_STYLE_BOTH;
+    let include_gnu_hash = hash_style == HASH_STYLE_GNU || hash_style == HASH_STYLE_BOTH;
+    let sysv_hash_bytes: [u8; 16] = [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let gnu_hash_bytes: [u8; 24] = [
+        1, 0, 0, 0, // nbuckets
+        1, 0, 0, 0, // symoffset
+        1, 0, 0, 0, // bloom size
+        0, 0, 0, 0, // bloom shift
+        0, 0, 0, 0, // bucket[0]
+        0, 0, 0, 0, // chain[0]
+    ];
     if !dynamic_entries.is_empty() {
         dynamic_size = dynamic_entries.len().saturating_mul(16);
         dynamic_offset = align_up(payload_end as u64, 16) as usize;
         dynstr_offset = align_up(dynamic_offset.saturating_add(dynamic_size) as u64, 16) as usize;
         dynstr_end = dynstr_offset.saturating_add(dynstr.len());
+        let mut hash_cursor = align_up(dynstr_end as u64, 8) as usize;
+        if include_sysv_hash {
+            sysv_hash_offset = hash_cursor;
+            hash_cursor = hash_cursor.saturating_add(sysv_hash_bytes.len());
+        }
+        if include_gnu_hash {
+            hash_cursor = align_up(hash_cursor as u64, 8) as usize;
+            gnu_hash_offset = hash_cursor;
+            hash_cursor = hash_cursor.saturating_add(gnu_hash_bytes.len());
+        }
+        if hash_cursor > dynstr_end {
+            dynstr_end = hash_cursor;
+        }
         if dynstr_end > total_size {
             total_size = dynstr_end;
         }
@@ -1206,7 +1310,7 @@ fn write_minimal_elf_exec(
     out[5] = 1; // little-endian
     out[6] = 1; // version
     write_u16_le(&mut out, 16, et_type);
-    write_u16_le(&mut out, 18, EM_X86_64);
+    write_u16_le(&mut out, 18, machine);
     write_u32_le(&mut out, 20, EV_CURRENT);
     write_u64_le(
         &mut out,
@@ -1250,9 +1354,17 @@ fn write_minimal_elf_exec(
     if !dynamic_entries.is_empty() {
         let dynamic_vaddr = image_base.saturating_add(dynamic_offset.saturating_sub(payload_offset) as u64);
         let dynstr_vaddr = image_base.saturating_add(dynstr_offset.saturating_sub(payload_offset) as u64);
+        let sysv_hash_vaddr =
+            image_base.saturating_add(sysv_hash_offset.saturating_sub(payload_offset) as u64);
+        let gnu_hash_vaddr =
+            image_base.saturating_add(gnu_hash_offset.saturating_sub(payload_offset) as u64);
         for i in 0..dynamic_entries.len() {
             if dynamic_entries[i].0 == DT_STRTAB {
                 dynamic_entries[i].1 = dynstr_vaddr;
+            } else if dynamic_entries[i].0 == DT_HASH {
+                dynamic_entries[i].1 = sysv_hash_vaddr;
+            } else if dynamic_entries[i].0 == DT_GNU_HASH {
+                dynamic_entries[i].1 = gnu_hash_vaddr;
             }
         }
         let dynamic_phoff = phoff + ph_index.saturating_mul(56);
@@ -1272,6 +1384,14 @@ fn write_minimal_elf_exec(
             write_u64_le(&mut out, off + 8, value);
         }
         out[dynstr_offset..dynstr_offset + dynstr.len()].copy_from_slice(&dynstr);
+        if include_sysv_hash && sysv_hash_offset != 0 {
+            out[sysv_hash_offset..sysv_hash_offset + sysv_hash_bytes.len()]
+                .copy_from_slice(&sysv_hash_bytes);
+        }
+        if include_gnu_hash && gnu_hash_offset != 0 {
+            out[gnu_hash_offset..gnu_hash_offset + gnu_hash_bytes.len()]
+                .copy_from_slice(&gnu_hash_bytes);
+        }
         ph_index += 1;
     }
 
@@ -1697,34 +1817,44 @@ fn tokenize_script_args(value: &str) -> Vec<String> {
 fn parse_target_value(raw: &str) -> Option<u32> {
     let normalized = raw.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "x86_64-linux" | "x86_64-linux-gnu" | "x86_64-unknown-linux-gnu" | "elf_x86_64"
-        | "elf64-x86-64"
-        | "aarch64-linux"
+        "x86_64-linux"
+        | "x86_64-linux-gnu"
+        | "x86_64-unknown-linux-gnu"
+        | "x86_64-linux-musl"
+        | "x86_64-unknown-linux-musl"
+        | "x86_64-alpine-linux-musl"
+        | "elf_x86_64"
+        | "elf64-x86-64" => Some(TARGET_X86_64_LINUX),
+        "aarch64-linux"
         | "aarch64-linux-gnu"
         | "aarch64-unknown-linux-gnu"
+        | "aarch64-linux-musl"
+        | "aarch64-unknown-linux-musl"
         | "elf64-littleaarch64"
-        | "aarch64elf" => Some(TARGET_X86_64_LINUX),
+        | "aarch64elf" => Some(TARGET_AARCH64_LINUX),
         "x86_64-windows-msvc"
         | "x86_64-pc-windows-msvc"
         | "x86_64-windows-gnu"
-        | "aarch64-windows-msvc"
-        | "aarch64-pc-windows-msvc"
-        | "aarch64-windows-gnu"
-        | "arm64pe"
+        | "x86_64-pc-windows-gnu"
         | "i386pep"
         | "pep"
         | "pe-x86-64" => Some(TARGET_X86_64_WINDOWS),
+        "aarch64-windows-msvc"
+        | "aarch64-pc-windows-msvc"
+        | "aarch64-windows-gnu"
+        | "aarch64-pc-windows-gnu"
+        | "arm64pe" => Some(TARGET_AARCH64_WINDOWS),
         "x86_64-apple-darwin"
         | "x86_64-macos"
         | "mach_o_x86_64"
-        | "macho-x86-64"
-        | "aarch64-apple-darwin"
-        | "arm64-apple-darwin"
-        | "arm64-macos"
-        | "macho-arm64" => {
-            Some(TARGET_X86_64_MACOS)
+        | "macho-x86-64" => Some(TARGET_X86_64_MACOS),
+        "aarch64-apple-darwin" | "arm64-apple-darwin" | "arm64-macos" | "macho-arm64" => {
+            Some(TARGET_AARCH64_MACOS)
         }
-        "x86_64-none" => Some(TARGET_X86_64_NONE),
+        "x86_64-none" | "x86_64-unknown-none-elf" | "x86_64-pc-none-elf" => Some(TARGET_NONE),
+        "aarch64-none" | "aarch64-unknown-none-elf" | "aarch64-pc-none-elf" => {
+            Some(TARGET_AARCH64_LINUX)
+        }
         _ => None,
     }
 }
@@ -1820,57 +1950,289 @@ fn eval_script_atom(state: &LinkerState, raw: &str) -> Option<u64> {
     state.globals.get(&fnv1a64(token)).map(|g| g.address)
 }
 
-fn eval_script_expr(state: &LinkerState, raw: &str) -> Option<u64> {
+fn strip_wrapping_parens(raw: &str) -> Option<&str> {
+    let text = raw.trim();
+    if !(text.starts_with('(') && text.ends_with(')')) {
+        return None;
+    }
+    let mut depth = 0u32;
+    for (idx, ch) in text.char_indices() {
+        if ch == '(' {
+            depth = depth.saturating_add(1);
+        } else if ch == ')' {
+            if depth == 0 {
+                return None;
+            }
+            depth -= 1;
+            if depth == 0 && idx + ch.len_utf8() < text.len() {
+                return None;
+            }
+        }
+    }
+    if depth == 0 && text.len() >= 2 {
+        Some(text[1..text.len() - 1].trim())
+    } else {
+        None
+    }
+}
+
+fn find_last_top_level_char_operator(text: &str, ops: &[char]) -> Option<(usize, char)> {
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut escape = false;
+    let mut candidate: Option<(usize, char)> = None;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == quote {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            in_string = true;
+            quote = ch;
+            continue;
+        }
+        if ch == '(' {
+            depth = depth.saturating_add(1);
+            continue;
+        }
+        if ch == ')' {
+            if depth > 0 {
+                depth -= 1;
+            }
+            continue;
+        }
+        if depth != 0 {
+            continue;
+        }
+        if !ops.contains(&ch) {
+            continue;
+        }
+        let lhs = text[..idx].trim();
+        if lhs.is_empty() {
+            continue;
+        }
+        candidate = Some((idx, ch));
+    }
+    candidate
+}
+
+fn find_last_top_level_shift_operator(text: &str) -> Option<(usize, usize, bool)> {
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut quote = b'\0';
+    let mut escape = false;
+    let mut candidate: Option<(usize, usize, bool)> = None;
+
+    while idx < bytes.len() {
+        let ch = bytes[idx];
+        if in_string {
+            if escape {
+                escape = false;
+                idx += 1;
+                continue;
+            }
+            if ch == b'\\' {
+                escape = true;
+                idx += 1;
+                continue;
+            }
+            if ch == quote {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if ch == b'"' || ch == b'\'' {
+            in_string = true;
+            quote = ch;
+            idx += 1;
+            continue;
+        }
+        if ch == b'(' {
+            depth = depth.saturating_add(1);
+            idx += 1;
+            continue;
+        }
+        if ch == b')' {
+            if depth > 0 {
+                depth -= 1;
+            }
+            idx += 1;
+            continue;
+        }
+        if depth == 0 && idx + 1 < bytes.len() {
+            if bytes[idx] == b'<' && bytes[idx + 1] == b'<' {
+                let lhs = text[..idx].trim();
+                if !lhs.is_empty() {
+                    candidate = Some((idx, 2, true));
+                }
+                idx += 2;
+                continue;
+            }
+            if bytes[idx] == b'>' && bytes[idx + 1] == b'>' {
+                let lhs = text[..idx].trim();
+                if !lhs.is_empty() {
+                    candidate = Some((idx, 2, false));
+                }
+                idx += 2;
+                continue;
+            }
+        }
+        idx += 1;
+    }
+    candidate
+}
+
+fn eval_script_primary(state: &LinkerState, raw: &str) -> Option<u64> {
     let text = raw.trim();
     if text.is_empty() {
         return None;
     }
-    let mut paren_depth = 0u32;
-    let mut start = 0usize;
-    let mut op = '+';
-    let mut acc = 0u64;
-    let mut have_value = false;
-    for (idx, ch) in text.char_indices() {
-        if ch == '(' {
-            paren_depth = paren_depth.saturating_add(1);
-            continue;
-        }
-        if ch == ')' {
-            if paren_depth > 0 {
-                paren_depth -= 1;
-            }
-            continue;
-        }
-        if paren_depth == 0 && (ch == '+' || ch == '-') {
-            let atom = text[start..idx].trim();
-            if !atom.is_empty() {
-                let value = eval_script_atom(state, atom)?;
-                if !have_value {
-                    acc = value;
-                    have_value = true;
-                } else if op == '+' {
-                    acc = acc.wrapping_add(value);
+    if let Some(inner) = strip_wrapping_parens(text) {
+        return eval_script_expr(state, inner);
+    }
+    eval_script_atom(state, text)
+}
+
+fn eval_script_unary(state: &LinkerState, raw: &str) -> Option<u64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(rest) = text.strip_prefix('+') {
+        return eval_script_unary(state, rest);
+    }
+    if let Some(rest) = text.strip_prefix('-') {
+        let rhs = eval_script_unary(state, rest)?;
+        return Some(0u64.wrapping_sub(rhs));
+    }
+    if let Some(rest) = text.strip_prefix('~') {
+        let rhs = eval_script_unary(state, rest)?;
+        return Some(!rhs);
+    }
+    eval_script_primary(state, text)
+}
+
+fn eval_script_mul_div_mod(state: &LinkerState, raw: &str) -> Option<u64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((idx, op)) = find_last_top_level_char_operator(text, &['*', '/', '%']) {
+        let lhs = eval_script_mul_div_mod(state, &text[..idx])?;
+        let rhs = eval_script_unary(state, &text[idx + op.len_utf8()..])?;
+        return match op {
+            '*' => Some(lhs.wrapping_mul(rhs)),
+            '/' => {
+                if rhs == 0 {
+                    None
                 } else {
-                    acc = acc.wrapping_sub(value);
+                    Some(lhs / rhs)
                 }
             }
-            op = ch;
-            start = idx + ch.len_utf8();
-        }
+            '%' => {
+                if rhs == 0 {
+                    None
+                } else {
+                    Some(lhs % rhs)
+                }
+            }
+            _ => None,
+        };
     }
-    let tail = text[start..].trim();
-    if !tail.is_empty() {
-        let value = eval_script_atom(state, tail)?;
-        if !have_value {
-            acc = value;
-            have_value = true;
-        } else if op == '+' {
-            acc = acc.wrapping_add(value);
+    eval_script_unary(state, text)
+}
+
+fn eval_script_add_sub(state: &LinkerState, raw: &str) -> Option<u64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((idx, op)) = find_last_top_level_char_operator(text, &['+', '-']) {
+        let lhs = eval_script_add_sub(state, &text[..idx])?;
+        let rhs = eval_script_mul_div_mod(state, &text[idx + op.len_utf8()..])?;
+        return if op == '+' {
+            Some(lhs.wrapping_add(rhs))
         } else {
-            acc = acc.wrapping_sub(value);
-        }
+            Some(lhs.wrapping_sub(rhs))
+        };
     }
-    if have_value { Some(acc) } else { None }
+    eval_script_mul_div_mod(state, text)
+}
+
+fn eval_script_shift(state: &LinkerState, raw: &str) -> Option<u64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((idx, len, is_left)) = find_last_top_level_shift_operator(text) {
+        let lhs = eval_script_shift(state, &text[..idx])?;
+        let rhs = eval_script_add_sub(state, &text[idx + len..])?;
+        let shift = (rhs & 63) as u32;
+        return if is_left {
+            Some(lhs.wrapping_shl(shift))
+        } else {
+            Some(lhs.wrapping_shr(shift))
+        };
+    }
+    eval_script_add_sub(state, text)
+}
+
+fn eval_script_bit_and(state: &LinkerState, raw: &str) -> Option<u64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((idx, _op)) = find_last_top_level_char_operator(text, &['&']) {
+        let lhs = eval_script_bit_and(state, &text[..idx])?;
+        let rhs = eval_script_shift(state, &text[idx + 1..])?;
+        return Some(lhs & rhs);
+    }
+    eval_script_shift(state, text)
+}
+
+fn eval_script_bit_xor(state: &LinkerState, raw: &str) -> Option<u64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((idx, _op)) = find_last_top_level_char_operator(text, &['^']) {
+        let lhs = eval_script_bit_xor(state, &text[..idx])?;
+        let rhs = eval_script_bit_and(state, &text[idx + 1..])?;
+        return Some(lhs ^ rhs);
+    }
+    eval_script_bit_and(state, text)
+}
+
+fn eval_script_bit_or(state: &LinkerState, raw: &str) -> Option<u64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some((idx, _op)) = find_last_top_level_char_operator(text, &['|']) {
+        let lhs = eval_script_bit_or(state, &text[..idx])?;
+        let rhs = eval_script_bit_xor(state, &text[idx + 1..])?;
+        return Some(lhs | rhs);
+    }
+    eval_script_bit_xor(state, text)
+}
+
+fn eval_script_expr(state: &LinkerState, raw: &str) -> Option<u64> {
+    eval_script_bit_or(state, raw)
 }
 
 fn parse_memory_keyword_value(state: &LinkerState, statement: &str, keyword: &str) -> Option<u64> {
@@ -2067,6 +2429,125 @@ fn parse_sections_region_assignment(statement: &str) -> Option<String> {
     } else {
         Some(region.to_string())
     }
+}
+
+fn script_head_identifier(statement: &str) -> Option<String> {
+    let text = statement.trim_start();
+    if text.is_empty() {
+        return None;
+    }
+    let mut chars = text.char_indices();
+    let (_, first) = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    Some(text[..end].to_string())
+}
+
+fn is_supported_script_directive(head: &str) -> bool {
+    matches!(
+        head,
+        "ENTRY"
+            | "OUTPUT"
+            | "OUTPUT_FORMAT"
+            | "OUTPUT_ARCH"
+            | "TARGET"
+            | "SEARCH_DIR"
+            | "EXTERN"
+            | "PROVIDE"
+            | "PROVIDE_HIDDEN"
+            | "INPUT"
+            | "GROUP"
+            | "AS_NEEDED"
+            | "NO_AS_NEEDED"
+            | "INCLUDE"
+            | "ASSERT"
+            | "MEMORY"
+            | "SECTIONS"
+            | "PHDRS"
+            | "VERSION"
+    )
+}
+
+fn parse_script_symbol_assignment(statement: &str) -> Option<(String, String)> {
+    let text = statement.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut depth_paren = 0u32;
+    let mut depth_brace = 0u32;
+    let mut in_string = false;
+    let mut quote = '\0';
+    let mut escape = false;
+    let mut eq_index: Option<usize> = None;
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                continue;
+            }
+            if ch == quote {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            in_string = true;
+            quote = ch;
+            continue;
+        }
+        if ch == '(' {
+            depth_paren = depth_paren.saturating_add(1);
+            continue;
+        }
+        if ch == ')' {
+            if depth_paren > 0 {
+                depth_paren -= 1;
+            }
+            continue;
+        }
+        if ch == '{' {
+            depth_brace = depth_brace.saturating_add(1);
+            continue;
+        }
+        if ch == '}' {
+            if depth_brace > 0 {
+                depth_brace -= 1;
+            }
+            continue;
+        }
+        if depth_paren == 0 && depth_brace == 0 && ch == '=' {
+            eq_index = Some(idx);
+            break;
+        }
+    }
+    let idx = eq_index?;
+    let lhs = text[..idx].trim();
+    let rhs = text[idx + 1..].trim();
+    if lhs.is_empty() || rhs.is_empty() || lhs == "." {
+        return None;
+    }
+    let mut lhs_chars = lhs.chars();
+    let first = lhs_chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if !lhs_chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return None;
+    }
+    Some((lhs.to_string(), rhs.to_string()))
 }
 
 fn split_script_statements(cleaned: &str) -> Vec<String> {
@@ -2333,7 +2814,7 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     *state = LinkerState::default();
     state.output_path = DEFAULT_OUTPUT_HANDLE;
     state.output_format = FORMAT_ELF64;
-    state.target = TARGET_X86_64_NONE;
+    state.target = TARGET_NONE;
     state.entry = 0x0010_0000;
     state.image_base = 0x0001_0000;
     state.link_as_needed = false;
@@ -2352,6 +2833,12 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     state.color_diagnostics = false;
     state.print_gc_sections = false;
     state.icf_mode = ICF_MODE_NONE;
+    state.pe_no_entry = false;
+    state.pe_dynamic_base = true;
+    state.pe_nx_compat = true;
+    state.pe_large_address_aware = true;
+    state.dependency_file = 0;
+    state.emit_relocs = false;
 }
 
 fn probe_object_format_bytes(raw: &[u8]) -> u32 {
@@ -2936,13 +3423,82 @@ fn coff_characteristics_to_flags(characteristics: u32, section_name: &str) -> (u
     (section_type, sh_flags)
 }
 
-fn map_coff_relocation_type(reloc_type: u16) -> u32 {
+fn map_coff_relocation_type(machine: u16, reloc_type: u16) -> u32 {
+    if machine == COFF_MACHINE_AARCH64 {
+        return match reloc_type {
+            0x0000 => R_AARCH64_NONE,
+            0x0002 | 0x0003 | 0x0004 | 0x0005 | 0x0006 | 0x0007 | 0x0008 | 0x0009 => {
+                R_AARCH64_PREL32
+            }
+            0x000d => R_AARCH64_ABS32,
+            0x000e => R_AARCH64_ABS64,
+            _ => R_AARCH64_PREL32,
+        };
+    }
+
+    // IMAGE_REL_AMD64_* and related x86 family defaults.
     match reloc_type {
-        0 => 0,
-        1 => 1,
-        2 | 3 => 10,
-        4 | 5 | 6 | 7 | 8 | 9 => 2,
-        _ => 1,
+        0x0000 => R_X86_64_NONE, // ABSOLUTE
+        0x0001 => R_X86_64_64,   // ADDR64
+        0x0002 => R_X86_64_32,   // ADDR32
+        0x0003 => R_X86_64_32,   // ADDR32NB
+        0x0004 | 0x0005 | 0x0006 | 0x0007 | 0x0008 | 0x0009 => R_X86_64_PC32, // REL32*
+        0x000a | 0x000b => R_X86_64_32, // SECTION / SECREL
+        0x000e | 0x0010 => R_X86_64_PC32, // SREL32 / SSPAN32
+        _ => R_X86_64_32,
+    }
+}
+
+fn map_macho_relocation_type(machine: u16, macho_type: u32, pcrel: u32, length: u32) -> u32 {
+    let is_64 = length >= 3;
+    if machine == EM_AARCH64 {
+        return match macho_type {
+            0 => {
+                if is_64 {
+                    R_AARCH64_ABS64
+                } else {
+                    R_AARCH64_ABS32
+                }
+            }
+            2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 => R_AARCH64_PREL32,
+            _ => {
+                if pcrel == 1 {
+                    R_AARCH64_PREL32
+                } else if is_64 {
+                    R_AARCH64_ABS64
+                } else {
+                    R_AARCH64_ABS32
+                }
+            }
+        };
+    }
+
+    match macho_type {
+        0 => {
+            if is_64 {
+                R_X86_64_64
+            } else {
+                R_X86_64_32
+            }
+        }
+        1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => R_X86_64_PC32,
+        _ => {
+            if pcrel == 1 {
+                R_X86_64_PC32
+            } else if is_64 {
+                R_X86_64_64
+            } else {
+                R_X86_64_32
+            }
+        }
+    }
+}
+
+fn relocation_addend_width(reloc_type: u32) -> usize {
+    if reloc_type == R_X86_64_64 || reloc_type == R_AARCH64_ABS64 {
+        8
+    } else {
+        4
     }
 }
 
@@ -3150,14 +3706,14 @@ fn parse_coff_object(path: u64) -> Result<ObjectRecord, u32> {
                 let offset = read_u32_le_at(&raw, rel_off).ok_or(ERR_INVALID_FORMAT)? as u64;
                 let raw_symbol = read_u32_le_at(&raw, rel_off + 4).ok_or(ERR_INVALID_FORMAT)? as usize;
                 let reloc_kind_raw = read_u16_le_at(&raw, rel_off + 8).ok_or(ERR_INVALID_FORMAT)?;
-                let reloc_type = map_coff_relocation_type(reloc_kind_raw);
+                let reloc_type = map_coff_relocation_type(machine, reloc_kind_raw);
                 let symbol = if raw_symbol < raw_to_canonical.len() {
                     raw_to_canonical[raw_symbol]
                 } else {
                     0
                 };
                 let section_ref = &record.sections[sec_idx + 1];
-                let width = if reloc_type == 1 { 8 } else { 4 };
+                let width = relocation_addend_width(reloc_type);
                 let addend = read_addend(section_ref, offset, width);
                 record.relocations.push(ObjectRelocation {
                     section: (sec_idx + 1) as u32,
@@ -3367,18 +3923,13 @@ fn parse_macho_object(path: u64) -> Result<ObjectRecord, u32> {
             let pcrel = (info >> 24) & 0x1;
             let length = (info >> 25) & 0x3;
             let is_extern = (info >> 27) & 0x1;
-            let reloc_type = if pcrel == 1 {
-                2
-            } else if length == 3 {
-                1
-            } else {
-                10
-            };
+            let macho_type = (info >> 28) & 0x0f;
+            let reloc_type = map_macho_relocation_type(record.machine, macho_type, pcrel, length);
             let section_ref = match record.sections.iter().find(|s| s.index == reloc.section_index) {
                 Some(v) => v,
                 None => continue,
             };
-            let width = if reloc_type == 1 { 8 } else { 4 };
+            let width = relocation_addend_width(reloc_type);
             let addend = read_addend(section_ref, r_address as u64, width);
             let symbol = if is_extern == 1 && (symbolnum as usize) < record.symbols.len() {
                 symbolnum as u32
@@ -3451,7 +4002,17 @@ fn pe_section_name(flags: u64, index: usize) -> [u8; 8] {
     out
 }
 
-fn write_minimal_pe_exec(path: &Path, entry: u64, image_base: u64, chunks: &[OutputChunk]) -> u32 {
+fn write_minimal_pe_exec(
+    path: &Path,
+    entry: u64,
+    image_base: u64,
+    chunks: &[OutputChunk],
+    machine: u16,
+    pe_no_entry: bool,
+    pe_dynamic_base: bool,
+    pe_nx_compat: bool,
+    pe_large_address_aware: bool,
+) -> u32 {
     #[derive(Clone)]
     struct PeSectionPlan {
         name: [u8; 8],
@@ -3550,6 +4111,9 @@ fn write_minimal_pe_exec(path: &Path, entry: u64, image_base: u64, chunks: &[Out
     if entry_rva < 0x1000 {
         entry_rva = 0x1000;
     }
+    if pe_no_entry {
+        entry_rva = 0;
+    }
 
     let total_size = headers_raw_size as usize + cursor_raw as usize;
     let size_of_image = align_up_u32(max_rva_end.max(0x1000), section_align);
@@ -3561,13 +4125,17 @@ fn write_minimal_pe_exec(path: &Path, entry: u64, image_base: u64, chunks: &[Out
 
     out[pe_offset..pe_offset + 4].copy_from_slice(b"PE\0\0");
     let coff = pe_offset + 4;
-    write_u16_le(&mut out, coff + 0, 0x8664);
+    write_u16_le(&mut out, coff + 0, machine);
     write_u16_le(&mut out, coff + 2, section_count as u16);
     write_u32_le(&mut out, coff + 4, 0);
     write_u32_le(&mut out, coff + 8, 0);
     write_u32_le(&mut out, coff + 12, 0);
     write_u16_le(&mut out, coff + 16, 0xF0);
-    write_u16_le(&mut out, coff + 18, 0x0022);
+    let mut characteristics = 0x0002u16;
+    if pe_large_address_aware {
+        characteristics |= 0x0020;
+    }
+    write_u16_le(&mut out, coff + 18, characteristics);
 
     let opt = coff + 20;
     write_u16_le(&mut out, opt + 0, 0x20b);
@@ -3583,7 +4151,14 @@ fn write_minimal_pe_exec(path: &Path, entry: u64, image_base: u64, chunks: &[Out
     write_u32_le(&mut out, opt + 56, size_of_image);
     write_u32_le(&mut out, opt + 60, headers_raw_size);
     write_u16_le(&mut out, opt + 68, 3);
-    write_u16_le(&mut out, opt + 70, 0x8140);
+    let mut dll_characteristics = 0x8000u16;
+    if pe_dynamic_base {
+        dll_characteristics |= 0x0040;
+    }
+    if pe_nx_compat {
+        dll_characteristics |= 0x0100;
+    }
+    write_u16_le(&mut out, opt + 70, dll_characteristics);
     write_u64_le(&mut out, opt + 72, 0x0010_0000);
     write_u64_le(&mut out, opt + 80, 0x0000_1000);
     write_u64_le(&mut out, opt + 88, 0x0010_0000);
@@ -3640,7 +4215,14 @@ fn macho_section_flags(flags: u64) -> u32 {
     }
 }
 
-fn write_minimal_macho_exec(path: &Path, entry: u64, image_base: u64, chunks: &[OutputChunk]) -> u32 {
+fn write_minimal_macho_exec(
+    path: &Path,
+    entry: u64,
+    image_base: u64,
+    chunks: &[OutputChunk],
+    cpu_type: u32,
+    cpu_subtype: u32,
+) -> u32 {
     #[derive(Clone)]
     struct MachSectionPlan {
         name: [u8; 16],
@@ -3737,8 +4319,8 @@ fn write_minimal_macho_exec(path: &Path, entry: u64, image_base: u64, chunks: &[
 
     let mut out = vec![0u8; filesize];
     write_u32_le(&mut out, 0, 0xfeedfacf);
-    write_u32_le(&mut out, 4, 0x0100_0007);
-    write_u32_le(&mut out, 8, 3);
+    write_u32_le(&mut out, 4, cpu_type);
+    write_u32_le(&mut out, 8, cpu_subtype);
     write_u32_le(&mut out, 12, 2);
     write_u32_le(&mut out, 16, 2);
     write_u32_le(&mut out, 20, sizeofcmds as u32);
@@ -3823,18 +4405,25 @@ fn extract_directive_arg(statement: &str, directive: &str) -> Option<String> {
     Some(trim_quotes(inner).to_string())
 }
 
-fn set_output_format_from_text(state: &mut LinkerState, raw: &str) {
+fn set_output_format_from_text(state: &mut LinkerState, raw: &str) -> bool {
     let normalized = raw.trim().to_ascii_lowercase();
     if normalized.contains("elf") {
         state.output_format = FORMAT_ELF64;
+        true
     } else if normalized.contains("pe") || normalized.contains("pei") {
         state.output_format = FORMAT_PE64;
+        true
     } else if normalized.contains("mach") {
         state.output_format = FORMAT_MACHO64;
+        true
     } else if normalized.contains("binary") || normalized == "bin" {
         state.output_format = FORMAT_BINARY;
+        true
     } else if normalized.contains("mbr") {
         state.output_format = FORMAT_MBR;
+        true
+    } else {
+        false
     }
 }
 
@@ -3846,6 +4435,33 @@ fn apply_linker_script_statement(
 ) -> u32 {
     let statement_trimmed = statement.trim();
     let statement_upper = statement_trimmed.to_ascii_uppercase();
+
+    if let Some((name, rhs)) = parse_script_symbol_assignment(statement_trimmed) {
+        let value = match eval_script_expr(state, &rhs) {
+            Some(v) => v,
+            None => return ERR_INVALID_FORMAT,
+        };
+        let name_hash = fnv1a64(&name);
+        if !state.allow_multiple_definition {
+            if let Some(existing) = state.globals.get(&name_hash) {
+                if existing.defined == 1 {
+                    return ERR_MULTIPLE_DEFINITION;
+                }
+            }
+        }
+        state.globals.insert(
+            name_hash,
+            GlobalSymbol {
+                object_index: 0,
+                symbol_index: 0,
+                bind: 1,
+                defined: 1,
+                address: value,
+            },
+        );
+        return ERR_OK;
+    }
+
     if statement_upper.starts_with("PHDRS") {
         if validate_named_block_statement(statement_trimmed, "PHDRS") {
             return ERR_OK;
@@ -3886,15 +4502,21 @@ fn apply_linker_script_statement(
     }
 
     if let Some(arg) = extract_directive_arg(statement, "OUTPUT_FORMAT") {
-        set_output_format_from_text(state, &arg);
+        if !set_output_format_from_text(state, &arg) {
+            return ERR_INVALID_FORMAT;
+        }
         return ERR_OK;
     }
 
     if let Some(arg) = extract_directive_arg(statement, "OUTPUT_ARCH") {
+        if arg.trim().is_empty() {
+            return ERR_INVALID_FORMAT;
+        }
         if let Some(target) = parse_target_value(&arg) {
             state.target = target;
+            return ERR_OK;
         }
-        return ERR_OK;
+        return ERR_UNSUPPORTED_TARGET;
     }
 
     if let Some(arg) = extract_directive_arg(statement, "OUTPUT") {
@@ -3906,10 +4528,14 @@ fn apply_linker_script_statement(
     }
 
     if let Some(arg) = extract_directive_arg(statement, "TARGET") {
+        if arg.trim().is_empty() {
+            return ERR_INVALID_FORMAT;
+        }
         if let Some(target) = parse_target_value(&arg) {
             state.target = target;
+            return ERR_OK;
         }
-        return ERR_OK;
+        return ERR_UNSUPPORTED_TARGET;
     }
 
     if let Some(arg) = extract_directive_arg(statement, "SEARCH_DIR") {
@@ -4011,6 +4637,13 @@ fn apply_linker_script_statement(
         state.image_base = state.memory_origin;
     }
 
+    if let Some(head) = script_head_identifier(statement_trimmed) {
+        let upper_head = head.to_ascii_uppercase();
+        if !is_supported_script_directive(&upper_head) {
+            return ERR_UNSUPPORTED_FLAG;
+        }
+    }
+
     ERR_OK
 }
 
@@ -4069,6 +4702,101 @@ fn ensure_parent(path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+}
+
+fn escape_depfile_token(token: &str) -> String {
+    let mut out = String::new();
+    for ch in token.chars() {
+        if ch == ' ' || ch == '#' {
+            out.push('\\');
+            out.push(ch);
+        } else if ch == '$' {
+            out.push('$');
+            out.push('$');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn write_dependency_file_for_state(state: &LinkerState) -> u32 {
+    if state.dependency_file == 0 {
+        return ERR_OK;
+    }
+    let dep_path = match to_path(state.dependency_file) {
+        Some(v) => v,
+        None => return ERR_WRITE_FAILED,
+    };
+    ensure_parent(&dep_path);
+    let output_text = to_path(state.output_path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| DEFAULT_OUTPUT_NAME.to_string());
+
+    let mut line = String::new();
+    line.push_str(&escape_depfile_token(&output_text));
+    line.push(':');
+
+    for handle in &state.inputs {
+        if let Some(text) = read_c_string(*handle) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                line.push(' ');
+                line.push_str(&escape_depfile_token(trimmed));
+            }
+        }
+    }
+    for handle in &state.archives {
+        if let Some(text) = read_c_string(*handle) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                line.push(' ');
+                line.push_str(&escape_depfile_token(trimmed));
+            }
+        }
+    }
+    line.push('\n');
+    match fs::write(dep_path, line) {
+        Ok(_) => ERR_OK,
+        Err(_) => ERR_WRITE_FAILED,
+    }
+}
+
+fn build_map_rows(state: &LinkerState) -> Vec<String> {
+    let mut rows = build_alloc_segments(state)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (addr, bytes, obj, sec))| {
+            format!(
+                "#{:04} obj={} sec={} addr=0x{:016x} size=0x{:x}",
+                i, obj, sec, addr, bytes.len()
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if state.emit_relocs {
+        let mut row_index = rows.len();
+        for (obj_index, object) in state.objects.iter().enumerate() {
+            for reloc in &object.relocations {
+                rows.push(format!(
+                    "#{:04} reloc obj={} sec={} off=0x{:x} type={} sym={} addend=0x{:x}",
+                    row_index,
+                    obj_index,
+                    reloc.section,
+                    reloc.offset,
+                    reloc.reloc_type,
+                    reloc.symbol,
+                    reloc.addend
+                ));
+                row_index += 1;
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
 }
 
 #[no_mangle]
@@ -4911,6 +5639,12 @@ pub extern "C" fn host_linker_set_fatal_warnings(enabled: u32) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_get_fatal_warnings() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.fatal_warnings { 1 } else { 0 }
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_set_color_diagnostics(enabled: u32) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.color_diagnostics = enabled != 0;
@@ -4918,10 +5652,55 @@ pub extern "C" fn host_linker_set_color_diagnostics(enabled: u32) -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_get_color_diagnostics() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.color_diagnostics { 1 } else { 0 }
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_set_print_gc_sections(enabled: u32) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.print_gc_sections = enabled != 0;
     set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_print_gc_sections() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.print_gc_sections { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_dependency_file(path: u64) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.dependency_file = path;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_dependency_file() -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.dependency_file
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_write_dependency_file() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let status = write_dependency_file_for_state(&state);
+    set_last_error(&mut state, status)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_emit_relocs(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.emit_relocs = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_emit_relocs() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.emit_relocs { 1 } else { 0 }
 }
 
 #[no_mangle]
@@ -4938,6 +5717,58 @@ pub extern "C" fn host_linker_set_icf_mode(mode: u32) -> u32 {
 pub extern "C" fn host_linker_get_icf_mode() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
     state.icf_mode
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_pe_no_entry(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.pe_no_entry = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_pe_no_entry() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.pe_no_entry { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_pe_dynamic_base(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.pe_dynamic_base = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_pe_dynamic_base() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.pe_dynamic_base { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_pe_nx_compat(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.pe_nx_compat = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_pe_nx_compat() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.pe_nx_compat { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_pe_large_address_aware(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.pe_large_address_aware = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_pe_large_address_aware() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.pe_large_address_aware { 1 } else { 0 }
 }
 
 #[no_mangle]
@@ -5248,6 +6079,16 @@ pub extern "C" fn host_linker_object_finalize(_path: u64) -> u32 {
 pub extern "C" fn host_linker_object_count() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
     state.objects.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_object_machine(object_index: u32) -> u16 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state
+        .objects
+        .get(object_index as usize)
+        .map(|o| o.machine)
+        .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -5677,11 +6518,14 @@ fn write_elf_output_for_state(
     } else {
         state.image_base.max(0x0010_0000)
     };
+    let elf_machine = target_elf_machine(state.target);
     let dynamic_linker = if link_static || link_shared {
         None
     } else if state.dynamic_linker_path != 0 {
         read_c_string(state.dynamic_linker_path)
-    } else if state.target == TARGET_X86_64_LINUX || state.target == TARGET_X86_64_NONE {
+    } else if state.target == TARGET_AARCH64_LINUX {
+        Some("/lib/ld-linux-aarch64.so.1".to_string())
+    } else if target_is_linux(state.target) {
         Some("/lib64/ld-linux-x86-64.so.2".to_string())
     } else {
         None
@@ -5722,12 +6566,14 @@ fn write_elf_output_for_state(
         &build_id,
         execstack,
         et_type,
+        elf_machine,
         dynamic_linker.as_deref(),
         soname.as_deref(),
         &needed_libs,
         runpath.as_deref(),
         new_dtags,
         z_now,
+        state.hash_style,
     )
 }
 
@@ -5776,8 +6622,23 @@ pub extern "C" fn host_linker_write_pe_image(output: u64) -> u32 {
     } else {
         0x0000_0001_4000_0000u64
     };
+    let machine = target_pe_machine(state.target);
+    let pe_no_entry = state.pe_no_entry;
+    let pe_dynamic_base = state.pe_dynamic_base;
+    let pe_nx_compat = state.pe_nx_compat;
+    let pe_large_address_aware = state.pe_large_address_aware;
     drop(state);
-    write_minimal_pe_exec(&path, entry, image_base, &chunks)
+    write_minimal_pe_exec(
+        &path,
+        entry,
+        image_base,
+        &chunks,
+        machine,
+        pe_no_entry,
+        pe_dynamic_base,
+        pe_nx_compat,
+        pe_large_address_aware,
+    )
 }
 
 #[no_mangle]
@@ -5801,8 +6662,9 @@ pub extern "C" fn host_linker_write_macho_image(output: u64) -> u32 {
     } else {
         0x0000_0001_0000_0000u64
     };
+    let (cpu_type, cpu_subtype) = target_macho_cpu_type(state.target);
     drop(state);
-    write_minimal_macho_exec(&path, entry, image_base, &chunks)
+    write_minimal_macho_exec(&path, entry, image_base, &chunks, cpu_type, cpu_subtype)
 }
 
 #[no_mangle]
@@ -5859,17 +6721,7 @@ pub extern "C" fn host_linker_finalize_image() -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_format_map_row(index: u32) -> u64 {
     let state = linker().lock().expect("linker mutex poisoned");
-    let rows = build_alloc_segments(&state)
-        .into_iter()
-        .enumerate()
-        .map(|(i, (addr, bytes, obj, sec))| {
-            format!(
-                "#{:04} obj={} sec={} addr=0x{:016x} size=0x{:x}",
-                i, obj, sec, addr, bytes.len()
-            )
-        })
-        .collect::<Vec<_>>();
-    drop(state);
+    let rows = build_map_rows(&state);
     if let Some(row) = rows.get(index as usize) {
         intern_string(row)
     } else {
@@ -5880,8 +6732,7 @@ pub extern "C" fn host_linker_format_map_row(index: u32) -> u64 {
 #[no_mangle]
 pub extern "C" fn host_linker_map_row_count() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    let rows = build_alloc_segments(&state).len();
-    rows.max(1) as u32
+    build_map_rows(&state).len() as u32
 }
 
 #[no_mangle]
