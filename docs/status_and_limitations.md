@@ -26,6 +26,9 @@
 - compatibility CLI controls in host linker runtime now carry explicit state for hash-style, thread count, eh-frame-header, diagnostics toggles, print-gc toggles, and icf mode
 - host linker CLI compatibility coverage now includes script/export families (`--version-script`, `--dynamic-list`, `--trace-symbol`) plus broader no-op compatibility flags (`--print-map`, `--start-lib`, `--end-lib`, `--emit-relocs`, `--strip-all`)
 - host linker CLI compatibility coverage now also includes major `lld-link` slash-option families (`/OUT`, `/ENTRY`, `/MACHINE`, `/LIBPATH`, `/DEFAULTLIB`, `/MAP`, `/DLL`, `/SUBSYSTEM`, `/OPT`, `/WX`) plus common slash metadata compatibility paths
+- host linker dynamic-policy coverage now includes `--no-allow-shlib-undefined` and split-form parsing for `--dynamic-linker` / `--soname`
+- host linker `-z` coverage now includes `defs`/`undefs` unresolved-policy toggles and accepted compatibility tokens `text`/`notext`/`origin`
+- additional `lld-link` no-value compatibility forms are accepted (`/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, `/LARGEADDRESSAWARE`)
 - ELF write path no longer primes output with ident-only stubs during staged emission; header/finalize stages both execute complete ELF writer flow with section-index validation on staged section calls
 - PE/Mach-O host writers now emit sectionized images from alloc chunks instead of a single synthetic text payload section
 

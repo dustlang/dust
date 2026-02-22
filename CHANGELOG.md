@@ -86,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - compatibility-flag state wiring for `--hash-style`, `--threads`, `--thread-count`, `--eh-frame-hdr`, fatal/color diagnostics toggles, print-gc toggles, and `--icf=*` mode
   - broader host CLI compatibility handling for ld/lld-style script/export flags (`--version-script`, `--dynamic-list`, `--trace-symbol`, `--print-map`, `--start-lib`, `--end-lib`)
   - broader host CLI compatibility handling for `lld-link` slash-option families (`/OUT`, `/ENTRY`, `/MACHINE`, `/LIBPATH`, `/DEFAULTLIB`, `/MAP`, `/DLL`, `/SUBSYSTEM`, `/OPT`, `/WX`) and common slash metadata options
+  - dynamic-policy alias coverage for `--no-allow-shlib-undefined` and split-value parsing parity for `--dynamic-linker` / `--soname`
+  - expanded `-z` option semantics in host runtime (`defs`/`undefs`) plus accepted compatibility tokens (`text`/`notext`/`origin`)
+  - additional `lld-link` no-value compatibility acceptance (`/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, `/LARGEADDRESSAWARE`)
   - target alias expansion to accept `aarch64`/`arm64` triples in host linker target parsing
   - COFF/Mach-O object-format probe and symbol-ingest acceptance for arm64 machine/cpu IDs
   - ELF writer flow now emits a complete executable during header/finalize stages (instead of ident-only priming), and output-section stream calls validate section-index bounds

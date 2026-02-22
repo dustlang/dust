@@ -4550,6 +4550,10 @@ pub extern "C" fn host_linker_set_z_option(option: u64) -> u32 {
         "lazy" => state.z_now = false,
         "execstack" => state.z_execstack = true,
         "noexecstack" => state.z_execstack = false,
+        "defs" => state.no_undefined = true,
+        "undefs" => state.no_undefined = false,
+        // Accepted compatibility spellings that currently do not change emit policy.
+        "text" | "notext" | "origin" => {}
         _ => return set_last_error(&mut state, ERR_UNSUPPORTED_FLAG),
     }
     set_last_error(&mut state, ERR_OK)

@@ -32,7 +32,9 @@ This repository contains:
   - sysroot-aware `SEARCH_DIR(=...)` linker-script resolution and script `INPUT` handling for `-L` / `-l` tokens
   - compatibility-flag state wiring for hash-style/threading/diagnostic/icf controls
   - broader CLI compatibility handling for script/export-related ld/lld flags (`--version-script`, `--dynamic-list`, `--trace-symbol`, `--print-map`, `--start-lib`, `--end-lib`)
-  - `lld-link` slash-option compatibility handling (`/OUT`, `/ENTRY`, `/MACHINE`, `/LIBPATH`, `/DEFAULTLIB`, `/MAP`, `/DLL`, `/SUBSYSTEM`, `/OPT`, `/WX`)
+  - dynamic-policy alias handling for `--no-allow-shlib-undefined`
+  - expanded `-z` semantic handling for `defs`/`undefs` plus accepted compatibility tokens `text`/`notext`/`origin`
+  - `lld-link` slash-option compatibility handling (`/OUT`, `/ENTRY`, `/MACHINE`, `/LIBPATH`, `/DEFAULTLIB`, `/MAP`, `/DLL`, `/SUBSYSTEM`, `/OPT`, `/WX`, `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, `/LARGEADDRESSAWARE`)
   - additional target alias parsing for `aarch64`/`arm64` triples (mapped to platform linker target families)
   - complete ELF writer execution in staged header/finalize flow (no ident-only prewrite)
   - sectionized PE/Mach-O host writer emission from real alloc chunks
