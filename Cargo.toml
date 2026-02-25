@@ -9,14 +9,14 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Dust LLC"]
 license-file = "LICENSE"
 
 [workspace.dependencies]
-anyhow = "1.0"
-thiserror = "1.0"
+anyhow = { git = "https://github.com/dustsoftware/anyhow.git", rev = "80bfe291b16071c70f141e90e67e7032d966826b" }
+thiserror = { git = "https://github.com/dustsoftware/thiserror.git", rev = "41938bd3a03a70d34ed8e53d99c89c770c7c9c41" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
