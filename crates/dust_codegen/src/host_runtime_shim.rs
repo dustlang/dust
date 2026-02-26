@@ -1,6 +1,3 @@
-#![allow(clippy::missing_safety_doc)]
-#![allow(clippy::too_many_arguments)]
-
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
@@ -40,6 +37,7 @@ const SHT_PROGBITS: u32 = 1;
 const SHT_DYNAMIC: u32 = 6;
 const SHT_DYNSYM: u32 = 11;
 const STT_TLS: u8 = 6;
+const STB_GLOBAL: u8 = 1;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
@@ -223,6 +221,7 @@ struct Aarch64TlsSyntheticSlot {
     canonical_object_index: u32,
     canonical_symbol_index: u32,
     slot_index: u32,
+    reloc_addend: u64,
 }
 
 #[derive(Clone, Default)]
@@ -1174,6 +1173,7 @@ fn aarch64_tls_synth_reserve_slot(
         canonical_object_index,
         canonical_symbol_index,
         slot_index,
+        reloc_addend: 0,
     });
     Ok(slot_index)
 }
@@ -1184,6 +1184,23 @@ fn aarch64_tls_synth_slot_address_inner(state: &mut LinkerState, slot_index: u32
     }
     let base = aarch64_tls_synth_region_base_for_state(state);
     Ok(aarch64_tls_synth_slot_address(base, slot_index))
+}
+
+fn aarch64_tls_synth_record_addend(state: &mut LinkerState, slot_index: u32, addend: u64) -> Result<(), u32> {
+    let slot = state
+        .aarch64_tls_synth_slots
+        .get_mut(slot_index as usize)
+        .ok_or(ERR_INVALID_RELOCATION)?;
+    if slot.reloc_addend == 0 {
+        slot.reloc_addend = addend;
+        return Ok(());
+    }
+    if slot.reloc_addend != addend {
+        // Current staged synthetic slot model coalesces by symbol/model and does not allocate
+        // distinct slots for per-site addend variants yet.
+        return Err(ERR_NOT_IMPLEMENTED_YET);
+    }
+    Ok(())
 }
 
 fn aarch64_page_delta_bytes_host(target_addr: u64, place_addr: u64) -> u64 {
@@ -1214,6 +1231,7 @@ fn aarch64_tls_synth_reloc_value(
     place_addr: u64,
 ) -> Result<u64, u32> {
     let slot_index = aarch64_tls_synth_reserve_slot(state, object_index, symbol_index, reloc_type)?;
+    aarch64_tls_synth_record_addend(state, slot_index, addend)?;
     let slot_addr = aarch64_tls_synth_slot_address_inner(state, slot_index)?;
     let target = slot_addr.wrapping_add(addend);
     match reloc_type {
@@ -1458,27 +1476,103 @@ fn elf64_r_info(symbol_index: u32, reloc_type: u32) -> u64 {
     ((symbol_index as u64) << 32) | (reloc_type as u64)
 }
 
-fn build_aarch64_tls_synth_rela_dyn(state: &LinkerState) -> Vec<Elf64RelaRecord> {
+fn append_elf64_sym(
+    dynsym: &mut Vec<u8>,
+    st_name: u32,
+    st_info: u8,
+    st_other: u8,
+    st_shndx: u16,
+    st_value: u64,
+    st_size: u64,
+) {
+    let base = dynsym.len();
+    dynsym.resize(base.saturating_add(24), 0);
+    write_u32_le(dynsym, base, st_name);
+    if base + 4 < dynsym.len() {
+        dynsym[base + 4] = st_info;
+    }
+    if base + 5 < dynsym.len() {
+        dynsym[base + 5] = st_other;
+    }
+    write_u16_le(dynsym, base + 6, st_shndx);
+    write_u64_le(dynsym, base + 8, st_value);
+    write_u64_le(dynsym, base + 16, st_size);
+}
+
+fn aarch64_tls_synth_symbol_name(slot: &Aarch64TlsSyntheticSlot) -> String {
+    let model_tag = match slot.model {
+        AARCH64_TLS_SYNTH_MODEL_TLSGD => "gd",
+        AARCH64_TLS_SYNTH_MODEL_TLSLD => "ld",
+        AARCH64_TLS_SYNTH_MODEL_TLSDESC => "desc",
+        _ => "tls",
+    };
+    format!(
+        "__dust_tls_{}_h{:016x}_o{}_s{}",
+        model_tag,
+        slot.canonical_name_hash,
+        slot.canonical_object_index,
+        slot.canonical_symbol_index
+    )
+}
+
+fn build_aarch64_tls_synth_dynsym_and_rela_dyn(
+    state: &LinkerState,
+    dynstr: &mut Vec<u8>,
+) -> (Vec<u8>, Vec<Elf64RelaRecord>) {
     let base = match aarch64_tls_synth_region_base_from_state(state) {
         Some(v) => v,
-        None => return Vec::new(),
+        None => return (Vec::new(), Vec::new()),
     };
+    let mut dynsym = vec![0u8; 24]; // null dynsym entry
     let mut out = Vec::new();
+    let mut sym_index_by_key: HashMap<(u64, u32, u32), u32> = HashMap::new();
+    let mut slot_sym_index: HashMap<u32, u32> = HashMap::new();
+
+    for slot in &state.aarch64_tls_synth_slots {
+        if slot.model == AARCH64_TLS_SYNTH_MODEL_TLSLD {
+            continue;
+        }
+        let key = (
+            slot.canonical_name_hash,
+            slot.canonical_object_index,
+            slot.canonical_symbol_index,
+        );
+        if let Some(existing) = sym_index_by_key.get(&key) {
+            slot_sym_index.insert(slot.slot_index, *existing);
+            continue;
+        }
+        let name = aarch64_tls_synth_symbol_name(slot);
+        let st_name = dynstr.len() as u32;
+        dynstr.extend_from_slice(name.as_bytes());
+        dynstr.push(0);
+        let sym_index = (dynsym.len() / 24) as u32;
+        append_elf64_sym(
+            &mut dynsym,
+            st_name,
+            ((STB_GLOBAL & 0x0f) << 4) | (STT_TLS & 0x0f),
+            0,
+            SHN_UNDEF,
+            0,
+            0,
+        );
+        sym_index_by_key.insert(key, sym_index);
+        slot_sym_index.insert(slot.slot_index, sym_index);
+    }
+
     for slot in &state.aarch64_tls_synth_slots {
         let slot_addr = aarch64_tls_synth_slot_address(base, slot.slot_index);
         match slot.model {
             AARCH64_TLS_SYNTH_MODEL_TLSGD => {
-                // Provisional TLSGD GOT pair: module id + dtprel entry. Symbol index remains 0
-                // until dynsym symbol emission is implemented for input .o TLS symbols.
+                let sym_index = *slot_sym_index.get(&slot.slot_index).unwrap_or(&0);
                 out.push(Elf64RelaRecord {
                     offset: slot_addr,
-                    info: elf64_r_info(0, R_AARCH64_TLS_DTPMOD),
+                    info: elf64_r_info(sym_index, R_AARCH64_TLS_DTPMOD),
                     addend: 0,
                 });
                 out.push(Elf64RelaRecord {
                     offset: slot_addr.saturating_add(8),
-                    info: elf64_r_info(0, R_AARCH64_TLS_DTPREL),
-                    addend: 0,
+                    info: elf64_r_info(sym_index, R_AARCH64_TLS_DTPREL),
+                    addend: slot.reloc_addend,
                 });
             }
             AARCH64_TLS_SYNTH_MODEL_TLSLD => {
@@ -1490,16 +1584,17 @@ fn build_aarch64_tls_synth_rela_dyn(state: &LinkerState) -> Vec<Elf64RelaRecord>
                 });
             }
             AARCH64_TLS_SYNTH_MODEL_TLSDESC => {
+                let sym_index = *slot_sym_index.get(&slot.slot_index).unwrap_or(&0);
                 out.push(Elf64RelaRecord {
                     offset: slot_addr,
-                    info: elf64_r_info(0, R_AARCH64_TLSDESC),
-                    addend: 0,
+                    info: elf64_r_info(sym_index, R_AARCH64_TLSDESC),
+                    addend: slot.reloc_addend,
                 });
             }
             _ => {}
         }
     }
-    out
+    (dynsym, out)
 }
 
 #[derive(Clone)]
@@ -1658,16 +1753,13 @@ fn write_minimal_elf_exec(
         || runpath_offset.is_some()
         || z_now;
 
-    let dynsym = if dynamic_enabled {
-        // Minimal dynsym (null symbol). This keeps DT_SYMTAB/DT_SYMENT structurally valid while
-        // synthetic TLS descriptor/GOT relocs are materialized. Full TLS dynsym binding/name
-        // parity is tracked separately.
-        vec![0u8; 24]
-    } else {
-        Vec::new()
-    };
+    let mut dynsym = if dynamic_enabled { vec![0u8; 24] } else { Vec::new() };
     let tls_synth_rela_records = if dynamic_enabled && machine == EM_AARCH64 {
-        build_aarch64_tls_synth_rela_dyn(state)
+        let (dynsym_tls, rela_tls) = build_aarch64_tls_synth_dynsym_and_rela_dyn(state, &mut dynstr);
+        if !dynsym_tls.is_empty() {
+            dynsym = dynsym_tls;
+        }
+        rela_tls
     } else {
         Vec::new()
     };
@@ -7676,4 +7768,157 @@ pub extern "C" fn host_linker_strip_debug() -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.strip_debug = true;
     set_last_error(&mut state, ERR_OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dynamic_tag_map(raw: &[u8]) -> HashMap<u64, u64> {
+        let phoff = read_u64_le_at(raw, 32).unwrap_or(0) as usize;
+        let phentsize = read_u16_le_at(raw, 54).unwrap_or(0) as usize;
+        let phnum = read_u16_le_at(raw, 56).unwrap_or(0) as usize;
+        let mut dynamic_off = 0usize;
+        let mut dynamic_size = 0usize;
+        let mut load_off = 0usize;
+        let mut load_vaddr = 0u64;
+        for i in 0..phnum {
+            let off = phoff + i.saturating_mul(phentsize);
+            let p_type = read_u32_le_at(raw, off).unwrap_or(0);
+            if p_type == PT_DYNAMIC {
+                dynamic_off = read_u64_le_at(raw, off + 8).unwrap_or(0) as usize;
+                dynamic_size = read_u64_le_at(raw, off + 32).unwrap_or(0) as usize;
+            }
+            if p_type == PT_LOAD {
+                load_off = read_u64_le_at(raw, off + 8).unwrap_or(0) as usize;
+                load_vaddr = read_u64_le_at(raw, off + 16).unwrap_or(0);
+            }
+        }
+        let mut tags = HashMap::new();
+        let mut at = dynamic_off;
+        let end = dynamic_off.saturating_add(dynamic_size);
+        while at + 16 <= end && at + 16 <= raw.len() {
+            let tag = read_u64_le_at(raw, at).unwrap_or(DT_NULL);
+            let value = read_u64_le_at(raw, at + 8).unwrap_or(0);
+            tags.insert(tag, value);
+            at += 16;
+            if tag == DT_NULL {
+                break;
+            }
+        }
+        // Stash PT_LOAD mapping in high sentinel tags for helper-free callers.
+        tags.insert(0xffff_ffff_ffff_ff01, load_off as u64);
+        tags.insert(0xffff_ffff_ffff_ff02, load_vaddr);
+        tags
+    }
+
+    fn vaddr_to_file_off(tags: &HashMap<u64, u64>, vaddr: u64) -> usize {
+        let load_off = *tags.get(&0xffff_ffff_ffff_ff01).unwrap_or(&0);
+        let load_vaddr = *tags.get(&0xffff_ffff_ffff_ff02).unwrap_or(&0);
+        if vaddr < load_vaddr {
+            return 0;
+        }
+        load_off.saturating_add(vaddr - load_vaddr) as usize
+    }
+
+    fn cstr_from(raw: &[u8], off: usize) -> String {
+        if off >= raw.len() {
+            return String::new();
+        }
+        let rest = &raw[off..];
+        let end = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
+        String::from_utf8_lossy(&rest[..end]).to_string()
+    }
+
+    #[test]
+    fn aarch64_tls_synth_elf_emits_symbol_aware_dynsym_and_rela() {
+        let mut state = LinkerState::default();
+        reset_linker_state_defaults(&mut state);
+        state.target = TARGET_AARCH64_LINUX;
+        state.output_format = FORMAT_ELF64;
+        state.image_base = 0x0040_0000;
+        state.entry = 0x0040_1000;
+        state.aarch64_tls_synth_base = align_up(
+            state.image_base + AARCH64_TLS_SYNTH_REGION_OFFSET,
+            AARCH64_TLS_SYNTH_SLOT_SIZE,
+        );
+        state.aarch64_tls_synth_slots.push(Aarch64TlsSyntheticSlot {
+            model: AARCH64_TLS_SYNTH_MODEL_TLSDESC,
+            canonical_name_hash: 0x1111_2222_3333_4444,
+            canonical_object_index: 1,
+            canonical_symbol_index: 7,
+            slot_index: 0,
+            reloc_addend: 0x20,
+        });
+        state.aarch64_tls_synth_slots.push(Aarch64TlsSyntheticSlot {
+            model: AARCH64_TLS_SYNTH_MODEL_TLSGD,
+            canonical_name_hash: 0x5555_6666_7777_8888,
+            canonical_object_index: 2,
+            canonical_symbol_index: 9,
+            slot_index: 1,
+            reloc_addend: 0x30,
+        });
+
+        let temp = std::env::temp_dir().join("dustlink_tls_synth_fixture_aarch64.elf");
+        let _ = fs::remove_file(&temp);
+        let rc = write_elf_output_for_state(&temp, &state, state.entry, state.image_base);
+        assert_eq!(rc, ERR_OK);
+        let raw = fs::read(&temp).expect("read synthetic elf fixture");
+        let _ = fs::remove_file(&temp);
+
+        let tags = dynamic_tag_map(&raw);
+        assert!(tags.contains_key(&DT_SYMTAB));
+        assert_eq!(tags.get(&DT_SYMENT).copied().unwrap_or(0), 24);
+        assert!(tags.contains_key(&DT_RELA));
+        assert_eq!(tags.get(&DT_RELAENT).copied().unwrap_or(0), 24);
+        assert!(tags.contains_key(&DT_RELASZ));
+        assert_eq!(
+            tags.get(&DT_PLTGOT).copied().unwrap_or(0),
+            state.aarch64_tls_synth_base
+        );
+
+        let dynstr_vaddr = tags.get(&DT_STRTAB).copied().unwrap_or(0);
+        let dynsym_vaddr = tags.get(&DT_SYMTAB).copied().unwrap_or(0);
+        let rela_vaddr = tags.get(&DT_RELA).copied().unwrap_or(0);
+        let rela_size = tags.get(&DT_RELASZ).copied().unwrap_or(0) as usize;
+        let dynstr_off = vaddr_to_file_off(&tags, dynstr_vaddr);
+        let dynsym_off = vaddr_to_file_off(&tags, dynsym_vaddr);
+        let rela_off = vaddr_to_file_off(&tags, rela_vaddr);
+        assert!(rela_off > 0 && rela_size >= 24);
+        assert!(rela_off + rela_size <= raw.len());
+
+        let mut saw_tlsdesc = false;
+        let mut saw_tlsgd_dtprel = false;
+        let mut saw_named_symbol = false;
+        let mut off = rela_off;
+        let end = rela_off + rela_size;
+        while off + 24 <= end {
+            let r_info = read_u64_le_at(&raw, off + 8).unwrap_or(0);
+            let r_addend = read_u64_le_at(&raw, off + 16).unwrap_or(0);
+            let sym_index = (r_info >> 32) as u32;
+            let r_type = (r_info & 0xffff_ffff) as u32;
+            if r_type == R_AARCH64_TLSDESC {
+                saw_tlsdesc = true;
+                assert_ne!(sym_index, 0);
+                assert_eq!(r_addend, 0x20);
+            }
+            if r_type == R_AARCH64_TLS_DTPREL {
+                saw_tlsgd_dtprel = true;
+                assert_ne!(sym_index, 0);
+                assert_eq!(r_addend, 0x30);
+            }
+            if sym_index != 0 {
+                let sym_off = dynsym_off + (sym_index as usize).saturating_mul(24);
+                let st_name = read_u32_le_at(&raw, sym_off).unwrap_or(0) as usize;
+                let name = cstr_from(&raw, dynstr_off + st_name);
+                if name.starts_with("__dust_tls_") {
+                    saw_named_symbol = true;
+                }
+            }
+            off += 24;
+        }
+        assert!(saw_tlsdesc);
+        assert!(saw_tlsgd_dtprel);
+        assert!(saw_named_symbol);
+    }
 }
