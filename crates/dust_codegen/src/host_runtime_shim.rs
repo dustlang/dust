@@ -103,6 +103,7 @@ const IMAGE_FILE_DLL: u16 = 0x2000;
 const MACH_CPU_X86_64: u32 = 0x0100_0007;
 const MACH_CPU_ARM64: u32 = 0x0100_000c;
 const MH_DYLIB: u32 = 0x6;
+const LC_ID_DYLIB: u32 = 0x0d;
 
 const R_X86_64_NONE: u32 = 0;
 const R_X86_64_64: u32 = 1;
@@ -1787,6 +1788,190 @@ fn parse_elf_needed_libraries(raw: &[u8]) -> Vec<String> {
     }
 
     out
+}
+
+fn parse_elf_soname(raw: &[u8]) -> Option<String> {
+    if raw.len() < 64 || &raw[0..4] != b"\x7fELF" {
+        return None;
+    }
+    if raw[4] != 2 || raw[5] != 1 {
+        return None;
+    }
+
+    let shoff = read_u64_le_at(raw, 40)? as usize;
+    let shentsize = read_u16_le_at(raw, 58)? as usize;
+    let shnum = read_u16_le_at(raw, 60)? as usize;
+    if shoff == 0 || shentsize < 64 || shnum == 0 {
+        return None;
+    }
+    if shoff.saturating_add(shentsize.saturating_mul(shnum)) > raw.len() {
+        return None;
+    }
+
+    let mut dynamic_offset = 0usize;
+    let mut dynamic_size = 0usize;
+    let mut dynstr_section = 0usize;
+    for idx in 0..shnum {
+        let off = shoff + idx.saturating_mul(shentsize);
+        let sh_type = read_u32_le_at(raw, off + 4)?;
+        if sh_type == SHT_DYNAMIC {
+            dynamic_offset = read_u64_le_at(raw, off + 24)? as usize;
+            dynamic_size = read_u64_le_at(raw, off + 32)? as usize;
+            dynstr_section = read_u32_le_at(raw, off + 40)? as usize;
+            break;
+        }
+    }
+    if dynamic_offset == 0 || dynamic_size < 16 || dynstr_section >= shnum {
+        return None;
+    }
+    if dynamic_offset.saturating_add(dynamic_size) > raw.len() {
+        return None;
+    }
+
+    let dynstr_off = shoff + dynstr_section.saturating_mul(shentsize);
+    let dynstr_offset = read_u64_le_at(raw, dynstr_off + 24)? as usize;
+    let dynstr_size = read_u64_le_at(raw, dynstr_off + 32)? as usize;
+    if dynstr_offset == 0 || dynstr_size == 0 || dynstr_offset.saturating_add(dynstr_size) > raw.len() {
+        return None;
+    }
+
+    let mut off = dynamic_offset;
+    let end = dynamic_offset + dynamic_size;
+    while off + 16 <= end {
+        let tag = read_u64_le_at(raw, off)?;
+        let value = read_u64_le_at(raw, off + 8)?;
+        if tag == DT_NULL {
+            break;
+        }
+        if tag == DT_SONAME {
+            let name = dynstr_symbol_name(raw, dynstr_offset, dynstr_size, value as u32)?;
+            let trimmed = name.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+            return None;
+        }
+        off += 16;
+    }
+    None
+}
+
+fn parse_pe_export_library_name(raw: &[u8]) -> Option<String> {
+    if raw.len() < 0x40 || raw.get(0).copied() != Some(b'M') || raw.get(1).copied() != Some(b'Z') {
+        return None;
+    }
+    let pe_offset = read_u32_le_at(raw, 0x3c)? as usize;
+    if pe_offset + 24 > raw.len() || &raw[pe_offset..pe_offset + 4] != b"PE\0\0" {
+        return None;
+    }
+    let coff_off = pe_offset + 4;
+    let optional_size = read_u16_le_at(raw, coff_off + 16)? as usize;
+    let optional_off = coff_off + 20;
+    if optional_off + optional_size > raw.len() {
+        return None;
+    }
+    let characteristics = read_u16_le_at(raw, coff_off + 18)?;
+    if characteristics & IMAGE_FILE_DLL == 0 {
+        return None;
+    }
+    let magic = read_u16_le_at(raw, optional_off)?;
+    let data_dir_base = if magic == 0x20b {
+        optional_off + 112
+    } else if magic == 0x10b {
+        optional_off + 96
+    } else {
+        return None;
+    };
+    if data_dir_base + 8 > optional_off + optional_size {
+        return None;
+    }
+    let export_rva = read_u32_le_at(raw, data_dir_base)?;
+    if export_rva == 0 {
+        return None;
+    }
+    let section_count = read_u16_le_at(raw, coff_off + 2)? as usize;
+    let section_table_off = optional_off + optional_size;
+    if section_table_off + section_count.saturating_mul(40) > raw.len() {
+        return None;
+    }
+    let export_dir_off = pe_rva_to_file_offset(raw, section_table_off, section_count, export_rva)?;
+    if export_dir_off + 40 > raw.len() {
+        return None;
+    }
+    let name_rva = read_u32_le_at(raw, export_dir_off + 12)?;
+    if name_rva == 0 {
+        return None;
+    }
+    let name_off = pe_rva_to_file_offset(raw, section_table_off, section_count, name_rva)?;
+    let name = read_c_string_from_bytes(raw, name_off)?;
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+
+fn parse_macho_install_name(raw: &[u8]) -> Option<String> {
+    if raw.len() < 32 {
+        return None;
+    }
+    let magic = read_u32_le_at(raw, 0)?;
+    if magic != 0xfeedfacf && magic != 0xcffaedfe {
+        return None;
+    }
+    let ncmds = read_u32_le_at(raw, 16)? as usize;
+    let sizeofcmds = read_u32_le_at(raw, 20)? as usize;
+    if 32usize.saturating_add(sizeofcmds) > raw.len() {
+        return None;
+    }
+    let mut cursor = 32usize;
+    for _ in 0..ncmds {
+        if cursor + 8 > raw.len() {
+            return None;
+        }
+        let cmd = read_u32_le_at(raw, cursor)?;
+        let cmdsize = read_u32_le_at(raw, cursor + 4)? as usize;
+        if cmdsize < 8 || cursor + cmdsize > raw.len() {
+            return None;
+        }
+        if cmd == LC_ID_DYLIB {
+            if cmdsize < 24 {
+                return None;
+            }
+            let name_off = read_u32_le_at(raw, cursor + 8)? as usize;
+            if name_off >= cmdsize {
+                return None;
+            }
+            let start = cursor + name_off;
+            let end = cursor + cmdsize;
+            if start >= end || end > raw.len() {
+                return None;
+            }
+            let rel = &raw[start..end];
+            let nul = rel.iter().position(|b| *b == 0).unwrap_or(rel.len());
+            if nul == 0 {
+                return None;
+            }
+            let text = String::from_utf8_lossy(&rel[..nul]).to_string();
+            let trimmed = text.trim().to_string();
+            if trimmed.is_empty() {
+                return None;
+            }
+            return Some(trimmed);
+        }
+        cursor = cursor.saturating_add(cmdsize);
+    }
+    None
+}
+
+fn preferred_needed_library_name_from_resolved(resolved: &str) -> Option<String> {
+    let path = Path::new(resolved.trim());
+    let raw = fs::read(path).ok()?;
+    if raw.len() >= 2 && raw.get(0).copied() == Some(b'M') && raw.get(1).copied() == Some(b'Z') {
+        return parse_pe_export_library_name(&raw);
+    }
+    match probe_object_format_bytes(&raw) {
+        OBJECT_FORMAT_ELF64 => parse_elf_soname(&raw),
+        OBJECT_FORMAT_MACHO64 => parse_macho_install_name(&raw),
+        _ => None,
+    }
 }
 
 fn append_copy_dt_needed_entries(state: &mut LinkerState, resolved: &str) {
@@ -6003,7 +6188,8 @@ pub extern "C" fn host_linker_note_needed_library(requested: u64, resolved: u64,
         Some(v) => v,
         None => return set_last_error(&mut state, ERR_INVALID_FORMAT),
     };
-    add_needed_library_if_missing(&mut state, &normalized);
+    let preferred = preferred_needed_library_name_from_resolved(&resolved_text).unwrap_or(normalized);
+    add_needed_library_if_missing(&mut state, &preferred);
     append_copy_dt_needed_entries(&mut state, &resolved_text);
     set_last_error(&mut state, ERR_OK)
 }
