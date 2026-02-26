@@ -53,10 +53,14 @@ This repository contains:
       - shared-link TLS data reloc semantics now partially differentiate models: `TLS_DTPREL` resolves from TLS layout metadata, shared-link `TLS_TPREL` is rejected as invalid, and shared-link `TLS_DTPMOD` remains not yet implemented
       - TLSLE/TLSLD low12 offset instruction forms (`*_ADD_*_LO12_NC`, `*_LDST64_*_LO12_NC`, `*_LDST128_*_LO12_NC`) now reuse host-runtime TLS offset helpers in non-shared links
       - `R_AARCH64_TLSDESC_CALL` now applies as an instruction-shape-validated preserve (`BLR`) instead of being blanket-rejected with the remaining unsupported TLS descriptor sequence relocs
+      - host-runtime AArch64 TLS synthetic descriptor/GOT planning state and helper ABI are now used by Dust linker relocation application for `TLSGD` / `TLSLD` / `TLSDESC` descriptor-sequence instruction relocations (`reserve`, `count`, `slot address`, `reloc-value`)
+      - ELF host writer now materializes a synthetic AArch64 TLS descriptor/GOT-like load-image region for reserved descriptor-sequence slots and emits minimal dynamic relocation metadata (`DT_SYMTAB`, `DT_SYMENT`, `DT_RELA*`, synthetic `.rela.dyn` records) for staged TLS descriptor-sequence parity work
+      - initial TLS descriptor-sequence relaxation scope is limited to deterministic synthetic-slot reuse/coalescing (including TLSLD module-slot coalescing); full instruction-sequence rewrite relaxations remain pending
   - host runtime shared-object symbol ingest now returns `ERR_INVALID_FORMAT` for unknown/unsupported shared object payloads (no silent success on unknown format)
   - host runtime shared-object symbol ingest now validates target/ABI compatibility and shared-file kind before symbol ingest (ELF `ET_DYN`, Windows PE DLL/COFF machine, Mach-O dylib CPU type)
   - host runtime shared-object symbol ingest now filters non-exported metadata entries more strictly (ELF hidden/internal dynsyms, Mach-O private extern/debug symbols)
   - host runtime needed-library recording now prefers embedded shared-library names when available (ELF `DT_SONAME`, PE export DLL name, Mach-O `LC_ID_DYLIB` install name) instead of filename-only normalization
+  - Dust linker now reserves AArch64 TLS synthetic planning slots when unsupported TLS descriptor-sequence relocs are encountered (preparatory infrastructure only; no descriptor/GOT emission yet)
   - architecture-correct output header stamping in ELF/PE/Mach-O writers based on resolved target
   - real PE compatibility-state wiring for `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, `/LARGEADDRESSAWARE`
   - broader soft-compatibility handling for common ld/lld/lld-link metadata/profiling flag families (`--warn-*`, `--time-trace*`, `--lto-*`, `/GUARD:*`, `/TIMESTAMP:*`, `/MERGE:*`, `/SECTION:*`)

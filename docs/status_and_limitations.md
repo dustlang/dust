@@ -39,7 +39,10 @@
 - host linker runtime now computes AArch64 TLS data relocation values (`TLS_DTPMOD`, `TLS_DTPREL`, `TLS_TPREL`) for non-shared links using a deterministic synthesized TLS layout derived from object TLS sections
 - host linker runtime now partially differentiates shared-link AArch64 TLS data relocations: `TLS_DTPREL` resolves from TLS layout metadata, shared-link `TLS_TPREL` is rejected as invalid, and shared-link `TLS_DTPMOD` remains deferred
 - Dust linker relocation apply path now also supports AArch64 TLSLE/TLSLD low12 offset instruction relocations (`ADD`/`LDST64`/`LDST128`) in non-shared links by reusing host-runtime TLS offset helpers
-- Dust linker relocation apply path now permits `R_AARCH64_TLSDESC_CALL` as a validated `BLR` preserve relocation (remaining TLSDESC/TLSGD/TLSLD descriptor-sequence relocs are still deferred)
+- Dust linker relocation apply path now permits `R_AARCH64_TLSDESC_CALL` as a validated `BLR` preserve relocation and routes remaining `TLSGD`/`TLSLD`/`TLSDESC` descriptor-sequence instruction relocs through the host synthetic-slot reloc-value helper (staged semantics)
+- host runtime now includes AArch64 TLS synthetic descriptor/GOT planning state plus helper ABI (`reserve/count/slot-address/reloc-value`) and materializes a synthetic TLS descriptor/GOT-like slot region in ELF load images for reserved descriptor-sequence slots
+- host ELF writer now emits minimal synthetic dynamic relocation metadata (`DT_SYMTAB`, `DT_SYMENT`, `DT_RELA*`, synthetic `.rela.dyn` records) for reserved AArch64 TLS descriptor-sequence slots
+- initial TLS descriptor-sequence relaxation scope is limited to deterministic synthetic-slot reuse/coalescing (including TLSLD module-slot coalescing); full instruction-sequence rewrite relaxations remain pending
 - host linker output writers now emit architecture-correct machine/cpu identifiers for ELF/PE/Mach-O outputs
 - host linker PE output now applies `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, and `/LARGEADDRESSAWARE` to emitted header fields (entrypoint/characteristics)
 - host linker compatibility handling now includes broader soft-compatibility ld/lld/lld-link families (`--warn-*`, `--time-trace*`, `--lto-*`, `/GUARD:*`, `/TIMESTAMP:*`, `/MERGE:*`, `/SECTION:*`)
@@ -61,7 +64,8 @@
 - host shared-object symbol ingest now filters ELF hidden/internal dynsyms and Mach-O private extern/debug symbols from shared export fallback ingestion
 - host needed-library recording now prefers embedded shared-library names where available (`DT_SONAME`, PE export DLL name, Mach-O `LC_ID_DYLIB` install name) over filename-only normalization
 - full AArch64 ELF TLS descriptor / TLS instruction-family semantics are not complete yet (current coverage includes ingest/validation, bitfield patching for non-TLS instruction forms, and host-backed TLS data reloc math, but not exhaustive TLSDESC/GOT/TLS relaxation behavior parity)
-- AArch64 TLS instruction-family coverage is still partial: TLSLE/TLSLD low12 offset forms and `TLSDESC_CALL` now apply, but TLSDESC/TLSGD/TLSLD descriptor-sequence semantics and relaxations remain incomplete
+- AArch64 TLS instruction-family coverage is still partial: descriptor-sequence instruction relocs now patch against synthetic slot addresses, but full TLSDESC/TLSGD/TLSLD runtime semantics, symbol-aware dynamic relocation binding, and instruction rewrite relaxations remain incomplete
+- AArch64 TLS descriptor-sequence parity is no longer blocked on planning-only state: synthetic slot-region materialization and minimal `.rela.dyn` metadata emission are wired, but full TLSDESC/GOT runtime semantics and relaxations are still pending
 - shared-object handling remains primarily symbol-ingest oriented rather than full dynamic-linker semantic parity (though unknown shared-object formats now fail instead of silently succeeding)
 - shared-object handling remains primarily symbol-ingest oriented rather than full dynamic-linker semantic parity (now with stricter target/ABI/file-kind rejection before ingest)
 - shared-object handling remains primarily symbol-ingest oriented rather than full dynamic-linker semantic parity (now with stricter target/ABI/file-kind checks and tighter exported-symbol filtering)

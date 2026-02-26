@@ -50,9 +50,15 @@ const ET_DYN: u16 = 3;
 const EV_CURRENT: u32 = 1;
 const DT_NULL: u64 = 0;
 const DT_NEEDED: u64 = 1;
+const DT_PLTGOT: u64 = 3;
 const DT_HASH: u64 = 4;
 const DT_STRTAB: u64 = 5;
+const DT_SYMTAB: u64 = 6;
+const DT_RELA: u64 = 7;
+const DT_RELASZ: u64 = 8;
+const DT_RELAENT: u64 = 9;
 const DT_STRSZ: u64 = 10;
+const DT_SYMENT: u64 = 11;
 const DT_SONAME: u64 = 14;
 const DT_RPATH: u64 = 15;
 const DT_RUNPATH: u64 = 29;
@@ -115,9 +121,34 @@ const R_AARCH64_NONE: u32 = 0;
 const R_AARCH64_ABS64: u32 = 257;
 const R_AARCH64_ABS32: u32 = 258;
 const R_AARCH64_PREL32: u32 = 261;
+const R_AARCH64_TLSGD_ADR_PREL21: u32 = 512;
+const R_AARCH64_TLSGD_ADR_PAGE21: u32 = 513;
+const R_AARCH64_TLSGD_ADD_LO12_NC: u32 = 514;
+const R_AARCH64_TLSGD_MOVW_G1: u32 = 515;
+const R_AARCH64_TLSGD_MOVW_G0_NC: u32 = 516;
+const R_AARCH64_TLSLD_ADR_PREL21: u32 = 517;
+const R_AARCH64_TLSLD_ADR_PAGE21: u32 = 518;
+const R_AARCH64_TLSLD_ADD_LO12_NC: u32 = 519;
+const R_AARCH64_TLSLD_MOVW_G1: u32 = 520;
+const R_AARCH64_TLSLD_MOVW_G0_NC: u32 = 521;
+const R_AARCH64_TLSLD_LD_PREL19: u32 = 522;
+const R_AARCH64_TLSDESC_LD_PREL19: u32 = 560;
+const R_AARCH64_TLSDESC_ADR_PREL21: u32 = 561;
+const R_AARCH64_TLSDESC_ADR_PAGE21: u32 = 562;
+const R_AARCH64_TLSDESC_LD64_LO12: u32 = 563;
+const R_AARCH64_TLSDESC_ADD_LO12: u32 = 564;
+const R_AARCH64_TLSDESC_CALL: u32 = 569;
 const R_AARCH64_TLS_DTPMOD: u32 = 1028;
 const R_AARCH64_TLS_DTPREL: u32 = 1029;
 const R_AARCH64_TLS_TPREL: u32 = 1030;
+const R_AARCH64_TLSDESC: u32 = 1031;
+const R_AARCH64_RELATIVE: u32 = 1027;
+
+const AARCH64_TLS_SYNTH_MODEL_TLSGD: u32 = 1;
+const AARCH64_TLS_SYNTH_MODEL_TLSLD: u32 = 2;
+const AARCH64_TLS_SYNTH_MODEL_TLSDESC: u32 = 3;
+const AARCH64_TLS_SYNTH_SLOT_SIZE: u64 = 16;
+const AARCH64_TLS_SYNTH_REGION_OFFSET: u64 = 0x0200_0000;
 
 const STORAGE_CLASS_EXTERNAL: u8 = 2;
 const STORAGE_CLASS_STATIC: u8 = 3;
@@ -185,6 +216,22 @@ struct ArchiveMember {
     data_size: usize,
 }
 
+#[derive(Clone, Default)]
+struct Aarch64TlsSyntheticSlot {
+    model: u32,
+    canonical_name_hash: u64,
+    canonical_object_index: u32,
+    canonical_symbol_index: u32,
+    slot_index: u32,
+}
+
+#[derive(Clone, Default)]
+struct Elf64RelaRecord {
+    offset: u64,
+    info: u64,
+    addend: u64,
+}
+
 #[derive(Default)]
 struct LinkerState {
     last_error: u64,
@@ -248,6 +295,8 @@ struct LinkerState {
     pe_large_address_aware: bool,
     dependency_file: u64,
     emit_relocs: bool,
+    aarch64_tls_synth_base: u64,
+    aarch64_tls_synth_slots: Vec<Aarch64TlsSyntheticSlot>,
 }
 
 static STRINGS: OnceLock<Mutex<Vec<CString>>> = OnceLock::new();
@@ -1006,6 +1055,188 @@ fn tls_symbol_offset_inner(
     Ok(base.wrapping_add(symbol.value))
 }
 
+fn aarch64_tls_synth_model_for_reloc(reloc_type: u32) -> Option<u32> {
+    match reloc_type {
+        R_AARCH64_TLSGD_ADR_PREL21
+        | R_AARCH64_TLSGD_ADR_PAGE21
+        | R_AARCH64_TLSGD_ADD_LO12_NC
+        | R_AARCH64_TLSGD_MOVW_G1
+        | R_AARCH64_TLSGD_MOVW_G0_NC => Some(AARCH64_TLS_SYNTH_MODEL_TLSGD),
+        R_AARCH64_TLSLD_ADR_PREL21
+        | R_AARCH64_TLSLD_ADR_PAGE21
+        | R_AARCH64_TLSLD_ADD_LO12_NC
+        | R_AARCH64_TLSLD_MOVW_G1
+        | R_AARCH64_TLSLD_MOVW_G0_NC
+        | R_AARCH64_TLSLD_LD_PREL19 => Some(AARCH64_TLS_SYNTH_MODEL_TLSLD),
+        R_AARCH64_TLSDESC_LD_PREL19
+        | R_AARCH64_TLSDESC_ADR_PREL21
+        | R_AARCH64_TLSDESC_ADR_PAGE21
+        | R_AARCH64_TLSDESC_LD64_LO12
+        | R_AARCH64_TLSDESC_ADD_LO12
+        | R_AARCH64_TLSDESC_CALL => Some(AARCH64_TLS_SYNTH_MODEL_TLSDESC),
+        _ => None,
+    }
+}
+
+fn aarch64_tls_synth_fallback_name_hash(object_index: u32, symbol_index: u32) -> u64 {
+    0x4152_4d36_3454_4c53u64
+        ^ ((object_index as u64) << 32)
+        ^ (symbol_index as u64)
+}
+
+fn aarch64_tls_synth_symbol_identity(
+    state: &LinkerState,
+    object_index: u32,
+    symbol_index: u32,
+    model: u32,
+) -> Result<(u64, u32, u32), u32> {
+    let object = state
+        .objects
+        .get(object_index as usize)
+        .ok_or(ERR_INVALID_RELOCATION)?;
+    let symbol = object
+        .symbols
+        .get(symbol_index as usize)
+        .ok_or(ERR_INVALID_RELOCATION)?;
+
+    let mut canonical_object_index = object_index;
+    let mut canonical_symbol_index = symbol_index;
+    let mut name_hash = symbol.name_hash;
+
+    if symbol.shndx == SHN_UNDEF && name_hash != 0 {
+        if let Some(global) = state.globals.get(&name_hash) {
+            if global.defined == 1 {
+                canonical_object_index = global.object_index;
+                canonical_symbol_index = global.symbol_index;
+            }
+        }
+    }
+
+    if model == AARCH64_TLS_SYNTH_MODEL_TLSLD {
+        // TLSLD sequences are module/local-dynamic oriented: coalesce by output image/module.
+        canonical_object_index = 0;
+        canonical_symbol_index = 0;
+        name_hash = 0x544c_534c_442d_4d4f; // "TLSLD-MO" tag-like stable key.
+    }
+
+    if name_hash == 0 {
+        name_hash = aarch64_tls_synth_fallback_name_hash(canonical_object_index, canonical_symbol_index);
+    }
+
+    Ok((name_hash, canonical_object_index, canonical_symbol_index))
+}
+
+fn aarch64_tls_synth_region_base_for_state(state: &mut LinkerState) -> u64 {
+    if state.aarch64_tls_synth_base == 0 {
+        let image_base = if state.image_base == 0 {
+            0x0001_0000
+        } else {
+            state.image_base
+        };
+        state.aarch64_tls_synth_base = align_up(
+            image_base.saturating_add(AARCH64_TLS_SYNTH_REGION_OFFSET),
+            AARCH64_TLS_SYNTH_SLOT_SIZE,
+        );
+    }
+    state.aarch64_tls_synth_base
+}
+
+fn aarch64_tls_synth_slot_address(base: u64, slot_index: u32) -> u64 {
+    base.saturating_add((slot_index as u64).saturating_mul(AARCH64_TLS_SYNTH_SLOT_SIZE))
+}
+
+fn aarch64_tls_synth_reserve_slot(
+    state: &mut LinkerState,
+    object_index: u32,
+    symbol_index: u32,
+    reloc_type: u32,
+) -> Result<u32, u32> {
+    let model = aarch64_tls_synth_model_for_reloc(reloc_type).ok_or(ERR_INVALID_RELOCATION)?;
+    let (canonical_name_hash, canonical_object_index, canonical_symbol_index) =
+        aarch64_tls_synth_symbol_identity(state, object_index, symbol_index, model)?;
+
+    let _ = aarch64_tls_synth_region_base_for_state(state);
+
+    for slot in &state.aarch64_tls_synth_slots {
+        if slot.model == model
+            && slot.canonical_name_hash == canonical_name_hash
+            && slot.canonical_object_index == canonical_object_index
+            && slot.canonical_symbol_index == canonical_symbol_index
+        {
+            return Ok(slot.slot_index);
+        }
+    }
+
+    let slot_index = state.aarch64_tls_synth_slots.len() as u32;
+    state.aarch64_tls_synth_slots.push(Aarch64TlsSyntheticSlot {
+        model,
+        canonical_name_hash,
+        canonical_object_index,
+        canonical_symbol_index,
+        slot_index,
+    });
+    Ok(slot_index)
+}
+
+fn aarch64_tls_synth_slot_address_inner(state: &mut LinkerState, slot_index: u32) -> Result<u64, u32> {
+    if (slot_index as usize) >= state.aarch64_tls_synth_slots.len() {
+        return Err(ERR_INVALID_RELOCATION);
+    }
+    let base = aarch64_tls_synth_region_base_for_state(state);
+    Ok(aarch64_tls_synth_slot_address(base, slot_index))
+}
+
+fn aarch64_page_delta_bytes_host(target_addr: u64, place_addr: u64) -> u64 {
+    let page_mask = !0xfffu64;
+    let target_page = target_addr & page_mask;
+    let place_page = place_addr & page_mask;
+    if target_page >= place_page {
+        target_page - place_page
+    } else {
+        0u64.wrapping_sub(place_page - target_page)
+    }
+}
+
+fn pcrel_delta_bytes_host(place_addr: u64, target_addr: u64) -> u64 {
+    if target_addr >= place_addr {
+        target_addr - place_addr
+    } else {
+        0u64.wrapping_sub(place_addr - target_addr)
+    }
+}
+
+fn aarch64_tls_synth_reloc_value(
+    state: &mut LinkerState,
+    object_index: u32,
+    symbol_index: u32,
+    reloc_type: u32,
+    addend: u64,
+    place_addr: u64,
+) -> Result<u64, u32> {
+    let slot_index = aarch64_tls_synth_reserve_slot(state, object_index, symbol_index, reloc_type)?;
+    let slot_addr = aarch64_tls_synth_slot_address_inner(state, slot_index)?;
+    let target = slot_addr.wrapping_add(addend);
+    match reloc_type {
+        R_AARCH64_TLSLD_LD_PREL19 | R_AARCH64_TLSDESC_LD_PREL19 => Ok(pcrel_delta_bytes_host(place_addr, target)),
+        R_AARCH64_TLSGD_ADR_PREL21 | R_AARCH64_TLSLD_ADR_PREL21 | R_AARCH64_TLSDESC_ADR_PREL21 => {
+            Ok(pcrel_delta_bytes_host(place_addr, target))
+        }
+        R_AARCH64_TLSGD_ADR_PAGE21 | R_AARCH64_TLSLD_ADR_PAGE21 | R_AARCH64_TLSDESC_ADR_PAGE21 => {
+            Ok(aarch64_page_delta_bytes_host(target, place_addr))
+        }
+        R_AARCH64_TLSGD_ADD_LO12_NC
+        | R_AARCH64_TLSLD_ADD_LO12_NC
+        | R_AARCH64_TLSGD_MOVW_G1
+        | R_AARCH64_TLSGD_MOVW_G0_NC
+        | R_AARCH64_TLSLD_MOVW_G1
+        | R_AARCH64_TLSLD_MOVW_G0_NC
+        | R_AARCH64_TLSDESC_LD64_LO12
+        | R_AARCH64_TLSDESC_ADD_LO12 => Ok(target),
+        R_AARCH64_TLSDESC_CALL => Ok(0),
+        _ => Err(ERR_INVALID_RELOCATION),
+    }
+}
+
 fn aarch64_tls_data_reloc_value(
     state: &LinkerState,
     object_index: u32,
@@ -1166,6 +1397,111 @@ fn build_alloc_segments(state: &LinkerState) -> Vec<(u64, Vec<u8>, u32, u32)> {
     out
 }
 
+fn aarch64_tls_synth_region_base_from_state(state: &LinkerState) -> Option<u64> {
+    if state.aarch64_tls_synth_slots.is_empty() {
+        return None;
+    }
+    if state.aarch64_tls_synth_base != 0 {
+        return Some(state.aarch64_tls_synth_base);
+    }
+    let image_base = if state.image_base == 0 {
+        0x0001_0000
+    } else {
+        state.image_base
+    };
+    Some(align_up(
+        image_base.saturating_add(AARCH64_TLS_SYNTH_REGION_OFFSET),
+        AARCH64_TLS_SYNTH_SLOT_SIZE,
+    ))
+}
+
+fn build_aarch64_tls_synth_segment(state: &LinkerState) -> Option<(u64, Vec<u8>)> {
+    let base = aarch64_tls_synth_region_base_from_state(state)?;
+    let slot_count = state.aarch64_tls_synth_slots.len();
+    if slot_count == 0 {
+        return None;
+    }
+    let mut bytes = vec![0u8; slot_count.saturating_mul(AARCH64_TLS_SYNTH_SLOT_SIZE as usize)];
+
+    // Materialize a deterministic synthetic TLS descriptor/GOT-like region so descriptor-sequence
+    // relocations have concrete slot addresses in the load image. Slot contents remain zero-filled
+    // until full TLSDESC/GOT resolver semantics are emitted.
+    for slot in &state.aarch64_tls_synth_slots {
+        let at = (slot.slot_index as usize).saturating_mul(AARCH64_TLS_SYNTH_SLOT_SIZE as usize);
+        if at + 16 > bytes.len() {
+            continue;
+        }
+        // Local-dynamic module descriptor relaxation shape: [modid reloc target][0]
+        if slot.model == AARCH64_TLS_SYNTH_MODEL_TLSLD {
+            write_u64_le(&mut bytes, at + 8, 0);
+        }
+    }
+    Some((base, bytes))
+}
+
+fn append_sparse_image_segment(image: &mut Vec<u8>, base: u64, addr: u64, bytes: &[u8]) {
+    if addr < base {
+        return;
+    }
+    let rel = (addr - base) as usize;
+    if image.len() < rel {
+        image.resize(rel, 0);
+    }
+    let end = rel.saturating_add(bytes.len());
+    if image.len() < end {
+        image.resize(end, 0);
+    }
+    image[rel..end].copy_from_slice(bytes);
+}
+
+fn elf64_r_info(symbol_index: u32, reloc_type: u32) -> u64 {
+    ((symbol_index as u64) << 32) | (reloc_type as u64)
+}
+
+fn build_aarch64_tls_synth_rela_dyn(state: &LinkerState) -> Vec<Elf64RelaRecord> {
+    let base = match aarch64_tls_synth_region_base_from_state(state) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for slot in &state.aarch64_tls_synth_slots {
+        let slot_addr = aarch64_tls_synth_slot_address(base, slot.slot_index);
+        match slot.model {
+            AARCH64_TLS_SYNTH_MODEL_TLSGD => {
+                // Provisional TLSGD GOT pair: module id + dtprel entry. Symbol index remains 0
+                // until dynsym symbol emission is implemented for input .o TLS symbols.
+                out.push(Elf64RelaRecord {
+                    offset: slot_addr,
+                    info: elf64_r_info(0, R_AARCH64_TLS_DTPMOD),
+                    addend: 0,
+                });
+                out.push(Elf64RelaRecord {
+                    offset: slot_addr.saturating_add(8),
+                    info: elf64_r_info(0, R_AARCH64_TLS_DTPREL),
+                    addend: 0,
+                });
+            }
+            AARCH64_TLS_SYNTH_MODEL_TLSLD => {
+                // Relaxed local-dynamic module descriptor: module id only, zero offset in slot+8.
+                out.push(Elf64RelaRecord {
+                    offset: slot_addr,
+                    info: elf64_r_info(0, R_AARCH64_TLS_DTPMOD),
+                    addend: 0,
+                });
+            }
+            AARCH64_TLS_SYNTH_MODEL_TLSDESC => {
+                out.push(Elf64RelaRecord {
+                    offset: slot_addr,
+                    info: elf64_r_info(0, R_AARCH64_TLSDESC),
+                    addend: 0,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 #[derive(Clone)]
 struct OutputChunk {
     addr: u64,
@@ -1190,27 +1526,28 @@ fn build_output_chunks(state: &LinkerState) -> Vec<OutputChunk> {
 
 fn build_flat_image_bytes(state: &LinkerState) -> Vec<u8> {
     let segments = build_alloc_segments(state);
-    if segments.is_empty() {
+    let tls_synth_segment = build_aarch64_tls_synth_segment(state);
+    if segments.is_empty() && tls_synth_segment.is_none() {
         return Vec::new();
     }
-    let base = segments
+    let mut base = segments
         .first()
         .map(|(addr, _, _, _)| *addr)
         .unwrap_or(state.image_base);
+    if let Some((addr, _)) = &tls_synth_segment {
+        if base == 0 || *addr < base {
+            base = *addr;
+        }
+    }
+    if base == 0 {
+        base = state.image_base.max(0x0010_0000);
+    }
     let mut image = Vec::new();
     for (addr, bytes, _, _) in segments {
-        if addr < base {
-            continue;
-        }
-        let rel = (addr - base) as usize;
-        if image.len() < rel {
-            image.resize(rel, 0);
-        }
-        let end = rel + bytes.len();
-        if image.len() < end {
-            image.resize(end, 0);
-        }
-        image[rel..end].copy_from_slice(&bytes);
+        append_sparse_image_segment(&mut image, base, addr, &bytes);
+    }
+    if let Some((addr, bytes)) = tls_synth_segment {
+        append_sparse_image_segment(&mut image, base, addr, &bytes);
     }
     image
 }
@@ -1233,6 +1570,20 @@ fn write_u64_le(dst: &mut [u8], off: usize, value: u64) {
     }
 }
 
+fn encode_elf64_rela_records(records: &[Elf64RelaRecord]) -> Vec<u8> {
+    if records.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![0u8; records.len().saturating_mul(24)];
+    for (idx, record) in records.iter().enumerate() {
+        let off = idx.saturating_mul(24);
+        write_u64_le(&mut out, off, record.offset);
+        write_u64_le(&mut out, off + 8, record.info);
+        write_u64_le(&mut out, off + 16, record.addend);
+    }
+    out
+}
+
 fn write_minimal_elf_exec(
     path: &Path,
     entry: u64,
@@ -1249,6 +1600,7 @@ fn write_minimal_elf_exec(
     use_new_dtags: bool,
     z_now: bool,
     hash_style: u32,
+    state: &LinkerState,
 ) -> u32 {
     let phoff = 64usize;
 
@@ -1306,6 +1658,21 @@ fn write_minimal_elf_exec(
         || runpath_offset.is_some()
         || z_now;
 
+    let dynsym = if dynamic_enabled {
+        // Minimal dynsym (null symbol). This keeps DT_SYMTAB/DT_SYMENT structurally valid while
+        // synthetic TLS descriptor/GOT relocs are materialized. Full TLS dynsym binding/name
+        // parity is tracked separately.
+        vec![0u8; 24]
+    } else {
+        Vec::new()
+    };
+    let tls_synth_rela_records = if dynamic_enabled && machine == EM_AARCH64 {
+        build_aarch64_tls_synth_rela_dyn(state)
+    } else {
+        Vec::new()
+    };
+    let tls_synth_rela_bytes = encode_elf64_rela_records(&tls_synth_rela_records);
+
     let mut dynamic_entries: Vec<(u64, u64)> = Vec::new();
     if dynamic_enabled {
         for off in &needed_offsets {
@@ -1318,8 +1685,15 @@ fn write_minimal_elf_exec(
             let runpath_tag = if use_new_dtags { DT_RUNPATH } else { DT_RPATH };
             dynamic_entries.push((runpath_tag, off));
         }
+        if machine == EM_AARCH64 {
+            if let Some(got_addr) = aarch64_tls_synth_region_base_from_state(state) {
+                dynamic_entries.push((DT_PLTGOT, got_addr));
+            }
+        }
         // DT_STRTAB patched after layout is known.
         dynamic_entries.push((DT_STRTAB, 0));
+        dynamic_entries.push((DT_SYMTAB, 0));
+        dynamic_entries.push((DT_SYMENT, 24));
         if hash_style == HASH_STYLE_SYSV || hash_style == HASH_STYLE_BOTH {
             dynamic_entries.push((DT_HASH, 0));
         }
@@ -1327,6 +1701,11 @@ fn write_minimal_elf_exec(
             dynamic_entries.push((DT_GNU_HASH, 0));
         }
         dynamic_entries.push((DT_STRSZ, dynstr.len() as u64));
+        if !tls_synth_rela_bytes.is_empty() {
+            dynamic_entries.push((DT_RELA, 0));
+            dynamic_entries.push((DT_RELASZ, tls_synth_rela_bytes.len() as u64));
+            dynamic_entries.push((DT_RELAENT, 24));
+        }
         if z_now {
             dynamic_entries.push((DT_FLAGS, DF_BIND_NOW));
         }
@@ -1368,8 +1747,11 @@ fn write_minimal_elf_exec(
     let mut dynamic_size = 0usize;
     let mut dynstr_offset = 0usize;
     let mut dynstr_end = payload_end;
+    let mut dynsym_offset = 0usize;
+    let mut dynsym_end = payload_end;
     let mut sysv_hash_offset = 0usize;
     let mut gnu_hash_offset = 0usize;
+    let mut rela_dyn_offset = 0usize;
     let include_sysv_hash = hash_style == HASH_STYLE_SYSV || hash_style == HASH_STYLE_BOTH;
     let include_gnu_hash = hash_style == HASH_STYLE_GNU || hash_style == HASH_STYLE_BOTH;
     let sysv_hash_bytes: [u8; 16] = [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -1386,7 +1768,9 @@ fn write_minimal_elf_exec(
         dynamic_offset = align_up(payload_end as u64, 16) as usize;
         dynstr_offset = align_up(dynamic_offset.saturating_add(dynamic_size) as u64, 16) as usize;
         dynstr_end = dynstr_offset.saturating_add(dynstr.len());
-        let mut hash_cursor = align_up(dynstr_end as u64, 8) as usize;
+        dynsym_offset = align_up(dynstr_end as u64, 8) as usize;
+        dynsym_end = dynsym_offset.saturating_add(dynsym.len());
+        let mut hash_cursor = align_up(dynsym_end as u64, 8) as usize;
         if include_sysv_hash {
             sysv_hash_offset = hash_cursor;
             hash_cursor = hash_cursor.saturating_add(sysv_hash_bytes.len());
@@ -1396,16 +1780,21 @@ fn write_minimal_elf_exec(
             gnu_hash_offset = hash_cursor;
             hash_cursor = hash_cursor.saturating_add(gnu_hash_bytes.len());
         }
-        if hash_cursor > dynstr_end {
-            dynstr_end = hash_cursor;
+        if !tls_synth_rela_bytes.is_empty() {
+            hash_cursor = align_up(hash_cursor as u64, 8) as usize;
+            rela_dyn_offset = hash_cursor;
+            hash_cursor = hash_cursor.saturating_add(tls_synth_rela_bytes.len());
         }
-        if dynstr_end > total_size {
-            total_size = dynstr_end;
+        if hash_cursor > dynsym_end {
+            dynsym_end = hash_cursor;
+        }
+        if dynsym_end > total_size {
+            total_size = dynsym_end;
         }
     }
 
-    let load_end = if dynstr_end > payload_end {
-        dynstr_end
+    let load_end = if dynsym_end > payload_end {
+        dynsym_end
     } else {
         payload_end
     };
@@ -1465,17 +1854,24 @@ fn write_minimal_elf_exec(
     if !dynamic_entries.is_empty() {
         let dynamic_vaddr = image_base.saturating_add(dynamic_offset.saturating_sub(payload_offset) as u64);
         let dynstr_vaddr = image_base.saturating_add(dynstr_offset.saturating_sub(payload_offset) as u64);
+        let dynsym_vaddr = image_base.saturating_add(dynsym_offset.saturating_sub(payload_offset) as u64);
         let sysv_hash_vaddr =
             image_base.saturating_add(sysv_hash_offset.saturating_sub(payload_offset) as u64);
         let gnu_hash_vaddr =
             image_base.saturating_add(gnu_hash_offset.saturating_sub(payload_offset) as u64);
+        let rela_dyn_vaddr =
+            image_base.saturating_add(rela_dyn_offset.saturating_sub(payload_offset) as u64);
         for i in 0..dynamic_entries.len() {
             if dynamic_entries[i].0 == DT_STRTAB {
                 dynamic_entries[i].1 = dynstr_vaddr;
+            } else if dynamic_entries[i].0 == DT_SYMTAB {
+                dynamic_entries[i].1 = dynsym_vaddr;
             } else if dynamic_entries[i].0 == DT_HASH {
                 dynamic_entries[i].1 = sysv_hash_vaddr;
             } else if dynamic_entries[i].0 == DT_GNU_HASH {
                 dynamic_entries[i].1 = gnu_hash_vaddr;
+            } else if dynamic_entries[i].0 == DT_RELA {
+                dynamic_entries[i].1 = rela_dyn_vaddr;
             }
         }
         let dynamic_phoff = phoff + ph_index.saturating_mul(56);
@@ -1495,6 +1891,9 @@ fn write_minimal_elf_exec(
             write_u64_le(&mut out, off + 8, value);
         }
         out[dynstr_offset..dynstr_offset + dynstr.len()].copy_from_slice(&dynstr);
+        if !dynsym.is_empty() {
+            out[dynsym_offset..dynsym_offset + dynsym.len()].copy_from_slice(&dynsym);
+        }
         if include_sysv_hash && sysv_hash_offset != 0 {
             out[sysv_hash_offset..sysv_hash_offset + sysv_hash_bytes.len()]
                 .copy_from_slice(&sysv_hash_bytes);
@@ -1502,6 +1901,10 @@ fn write_minimal_elf_exec(
         if include_gnu_hash && gnu_hash_offset != 0 {
             out[gnu_hash_offset..gnu_hash_offset + gnu_hash_bytes.len()]
                 .copy_from_slice(&gnu_hash_bytes);
+        }
+        if !tls_synth_rela_bytes.is_empty() && rela_dyn_offset != 0 {
+            out[rela_dyn_offset..rela_dyn_offset + tls_synth_rela_bytes.len()]
+                .copy_from_slice(&tls_synth_rela_bytes);
         }
         ph_index += 1;
     }
@@ -6711,6 +7114,75 @@ pub extern "C" fn host_linker_aarch64_tls_data_reloc_value(
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_aarch64_tls_synth_reserve(
+    object_index: u32,
+    symbol_index: u32,
+    reloc_type: u32,
+) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let result = aarch64_tls_synth_reserve_slot(&mut state, object_index, symbol_index, reloc_type);
+    match result {
+        Ok(slot_index) => {
+            set_last_error(&mut state, ERR_OK);
+            slot_index
+        }
+        Err(code) => {
+            set_last_error(&mut state, code);
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_aarch64_tls_synth_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.aarch64_tls_synth_slots.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_aarch64_tls_synth_slot_address(slot_index: u32) -> u64 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    match aarch64_tls_synth_slot_address_inner(&mut state, slot_index) {
+        Ok(addr) => {
+            set_last_error(&mut state, ERR_OK);
+            addr
+        }
+        Err(code) => {
+            set_last_error(&mut state, code);
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_aarch64_tls_synth_reloc_value(
+    object_index: u32,
+    symbol_index: u32,
+    reloc_type: u32,
+    addend: u64,
+    place_addr: u64,
+) -> u64 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    match aarch64_tls_synth_reloc_value(
+        &mut state,
+        object_index,
+        symbol_index,
+        reloc_type,
+        addend,
+        place_addr,
+    ) {
+        Ok(v) => {
+            set_last_error(&mut state, ERR_OK);
+            v
+        }
+        Err(code) => {
+            set_last_error(&mut state, code);
+            0
+        }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_section_runtime_address(object_index: u32, section_index: u32) -> u64 {
     let state = linker().lock().expect("linker mutex poisoned");
     build_section_runtime_address(&state, object_index, section_index)
@@ -6989,6 +7461,7 @@ fn write_elf_output_for_state(
         new_dtags,
         z_now,
         state.hash_style,
+        state,
     )
 }
 

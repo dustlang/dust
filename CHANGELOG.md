@@ -115,9 +115,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - shared-link AArch64 TLS data relocation behavior now distinguishes models: `TLS_DTPREL` can resolve from TLS layout metadata, shared-link `TLS_TPREL` returns invalid relocation, and shared-link `TLS_DTPMOD` remains not yet implemented
     - AArch64 TLSLE/TLSLD low12 offset instruction relocations (`ADD`/`LDST64`/`LDST128`) now route through host-runtime TLS offset helpers in non-shared links
     - `R_AARCH64_TLSDESC_CALL` now applies as a validated `BLR` preserve relocation even while broader TLSDESC descriptor/GOT semantics remain incomplete
+    - preparatory AArch64 TLS synthetic descriptor/GOT planning state + host helper ABI (`reserve`, `count`, `slot address`, `reloc value`) for staged descriptor-sequence parity implementation
+    - host ELF writer synthetic AArch64 TLS descriptor/GOT-like slot-region materialization plus minimal synthetic `.rela.dyn` metadata emission (`DT_SYMTAB`, `DT_SYMENT`, `DT_RELA*`) for reserved descriptor-sequence slots
   - host runtime shared-object ingestion now returns `ERR_INVALID_FORMAT` for unknown/unsupported shared-object payloads instead of silently succeeding
   - host runtime shared-object symbol ingest now validates target/ABI compatibility and shared-file kind before symbol ingestion (`ELF ET_DYN`, Windows PE DLL/COFF machine, Mach-O dylib CPU type)
   - host runtime shared-object symbol ingest now filters non-exported metadata entries more strictly (ELF hidden/internal dynsyms; Mach-O private extern / debug-symbol entries)
+- Dust linker AArch64 TLS descriptor-sequence instruction relocation application now routes through the host synthetic-slot reloc-value helper and patches against reserved/materialized synthetic slot addresses (staged semantics; full TLSDESC runtime parity still incomplete)
+- TLS descriptor-sequence staged relaxation behavior now includes deterministic synthetic-slot reuse/coalescing (including TLSLD module-slot coalescing in emitted synthetic slot metadata), while full instruction-sequence rewrite relaxations remain deferred
   - host runtime needed-library recording now prefers embedded shared-library names (`DT_SONAME` / PE export DLL name / Mach-O install name) when present
 
 ### Changed
@@ -137,6 +141,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dust-built linker relocation parsing/validation now accepts and processes a broader AArch64 ELF relocation set (including MOVW and TLS starter forms) instead of rejecting them during ingest.
 - Dust-built linker relocation apply path no longer blanket-rejects all AArch64 TLS instruction-family relocations; TLSLE/TLSLD low12 offset forms now apply in non-shared links via host TLS offset helpers.
 - Dust-built linker relocation apply path now permits `R_AARCH64_TLSDESC_CALL` (validated `BLR` preserve) instead of rejecting it with the remaining unsupported TLSDESC descriptor-sequence relocs.
+- Dust-built linker relocation apply path no longer stops at a blanket unsupported gate for remaining AArch64 TLS descriptor-sequence instruction relocs; they now patch against host-planned synthetic slot addresses via the synthetic-slot reloc-value helper.
+- Dust-built linker/runtime now exposes an explicit AArch64 TLS synthetic descriptor/GOT planning ABI for upcoming descriptor-sequence parity work instead of relying on implicit future state.
+- Dust-built host ELF outputs now materialize reserved AArch64 TLS synthetic descriptor/GOT slots and emit minimal synthetic `.rela.dyn` metadata (`DT_SYMTAB`, `DT_SYMENT`, `DT_RELA*`) instead of leaving descriptor-sequence parity work entirely in planning state.
 - Host shared-object symbol ingest no longer accepts cross-target or wrong-kind binaries as valid shared inputs during symbol-ingest resolution.
 - Host shared-object symbol ingest no longer treats hidden/private metadata symbols as exported shared symbols during ELF/Mach-O symbol-ingest fallback.
 - Host needed-library emission no longer depends only on filename normalization when embedded shared library names are available.
