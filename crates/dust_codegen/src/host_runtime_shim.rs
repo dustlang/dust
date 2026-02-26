@@ -1014,7 +1014,21 @@ fn aarch64_tls_data_reloc_value(
     addend: u64,
 ) -> Result<u64, u32> {
     if state.link_shared {
-        return Err(ERR_NOT_IMPLEMENTED_YET);
+        match reloc_type {
+            R_AARCH64_TLS_DTPREL => {
+                let offset = tls_symbol_offset_inner(state, object_index, symbol_index, 0)?;
+                // Shared-object local-dynamic model can still resolve DTPREL offsets from local TLS layout.
+                return Ok(offset.wrapping_add(addend));
+            }
+            R_AARCH64_TLS_TPREL => {
+                // Local-exec TP-relative relocations are not valid for shared-object output.
+                return Err(ERR_INVALID_RELOCATION);
+            }
+            R_AARCH64_TLS_DTPMOD => {
+                return Err(ERR_NOT_IMPLEMENTED_YET);
+            }
+            _ => return Err(ERR_INVALID_RELOCATION),
+        }
     }
     match reloc_type {
         R_AARCH64_TLS_DTPMOD => Ok(1),
@@ -3358,7 +3372,16 @@ fn ingest_shared_elf_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
         };
         let st_info = *raw.get(sym_off + 4).unwrap_or(&0);
         let st_bind = st_info >> 4;
+        let st_type = st_info & 0x0f;
         if st_bind != 1 && st_bind != 2 {
+            continue;
+        }
+        if st_type == 3 || st_type == 4 {
+            continue;
+        }
+        let st_other = *raw.get(sym_off + 5).unwrap_or(&0);
+        let st_visibility = st_other & 0x03;
+        if st_visibility == 1 || st_visibility == 2 {
             continue;
         }
         let st_shndx = match read_u16_le_at(raw, sym_off + 6) {
@@ -3696,7 +3719,9 @@ fn ingest_shared_macho_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
         let n_type = raw[off + 4];
         let n_type_kind = n_type & 0x0e;
         let is_external = (n_type & 0x01) != 0;
-        if !is_external || n_type_kind == 0x00 || strx >= strtab.len() {
+        let is_private_extern = (n_type & 0x10) != 0;
+        let is_stab = (n_type & 0xe0) != 0;
+        if !is_external || is_private_extern || is_stab || n_type_kind == 0x00 || strx >= strtab.len() {
             continue;
         }
         let rel = &strtab[strx..];

@@ -37,6 +37,7 @@
   - MOVW `UABS` / `SABS` / `PREL` families
   - starter TLS instruction/data relocations for `TLSGD` / `TLSLD` / `TLSDESC` plus `TLS_DTPMOD` / `TLS_DTPREL` / `TLS_TPREL`
 - host linker runtime now computes AArch64 TLS data relocation values (`TLS_DTPMOD`, `TLS_DTPREL`, `TLS_TPREL`) for non-shared links using a deterministic synthesized TLS layout derived from object TLS sections
+- host linker runtime now partially differentiates shared-link AArch64 TLS data relocations: `TLS_DTPREL` resolves from TLS layout metadata, shared-link `TLS_TPREL` is rejected as invalid, and shared-link `TLS_DTPMOD` remains deferred
 - Dust linker relocation apply path now also supports AArch64 TLSLE/TLSLD low12 offset instruction relocations (`ADD`/`LDST64`/`LDST128`) in non-shared links by reusing host-runtime TLS offset helpers
 - Dust linker relocation apply path now permits `R_AARCH64_TLSDESC_CALL` as a validated `BLR` preserve relocation (remaining TLSDESC/TLSGD/TLSLD descriptor-sequence relocs are still deferred)
 - host linker output writers now emit architecture-correct machine/cpu identifiers for ELF/PE/Mach-O outputs
@@ -57,11 +58,13 @@
   - `--print-gc-sections` (GC drop diagnostics)
 - host object ingestion now uses refined machine-aware COFF and Mach-O relocation-kind mapping during relocation record ingestion
 - host shared-object symbol ingest now enforces target/ABI/file-kind checks before symbol ingestion (`ELF ET_DYN` + target machine, Windows PE DLL/COFF machine, Mach-O dylib target CPU)
+- host shared-object symbol ingest now filters ELF hidden/internal dynsyms and Mach-O private extern/debug symbols from shared export fallback ingestion
 - host needed-library recording now prefers embedded shared-library names where available (`DT_SONAME`, PE export DLL name, Mach-O `LC_ID_DYLIB` install name) over filename-only normalization
 - full AArch64 ELF TLS descriptor / TLS instruction-family semantics are not complete yet (current coverage includes ingest/validation, bitfield patching for non-TLS instruction forms, and host-backed TLS data reloc math, but not exhaustive TLSDESC/GOT/TLS relaxation behavior parity)
 - AArch64 TLS instruction-family coverage is still partial: TLSLE/TLSLD low12 offset forms and `TLSDESC_CALL` now apply, but TLSDESC/TLSGD/TLSLD descriptor-sequence semantics and relaxations remain incomplete
 - shared-object handling remains primarily symbol-ingest oriented rather than full dynamic-linker semantic parity (though unknown shared-object formats now fail instead of silently succeeding)
 - shared-object handling remains primarily symbol-ingest oriented rather than full dynamic-linker semantic parity (now with stricter target/ABI/file-kind rejection before ingest)
+- shared-object handling remains primarily symbol-ingest oriented rather than full dynamic-linker semantic parity (now with stricter target/ABI/file-kind checks and tighter exported-symbol filtering)
 
 ## Important Mismatches to Track
 

@@ -50,10 +50,12 @@ This repository contains:
     - starter TLS relocation families:
       - instruction/descriptor forms (`TLSGD`, `TLSLD`, `TLSDESC`) recognized/validated with strict `ERR_NOT_IMPLEMENTED_YET` application for unsupported TLS descriptor semantics
       - data relocs (`TLS_DTPMOD` / `TLS_DTPREL` / `TLS_TPREL`) use host-runtime TLS layout metadata helpers for non-shared links
+      - shared-link TLS data reloc semantics now partially differentiate models: `TLS_DTPREL` resolves from TLS layout metadata, shared-link `TLS_TPREL` is rejected as invalid, and shared-link `TLS_DTPMOD` remains not yet implemented
       - TLSLE/TLSLD low12 offset instruction forms (`*_ADD_*_LO12_NC`, `*_LDST64_*_LO12_NC`, `*_LDST128_*_LO12_NC`) now reuse host-runtime TLS offset helpers in non-shared links
       - `R_AARCH64_TLSDESC_CALL` now applies as an instruction-shape-validated preserve (`BLR`) instead of being blanket-rejected with the remaining unsupported TLS descriptor sequence relocs
   - host runtime shared-object symbol ingest now returns `ERR_INVALID_FORMAT` for unknown/unsupported shared object payloads (no silent success on unknown format)
   - host runtime shared-object symbol ingest now validates target/ABI compatibility and shared-file kind before symbol ingest (ELF `ET_DYN`, Windows PE DLL/COFF machine, Mach-O dylib CPU type)
+  - host runtime shared-object symbol ingest now filters non-exported metadata entries more strictly (ELF hidden/internal dynsyms, Mach-O private extern/debug symbols)
   - host runtime needed-library recording now prefers embedded shared-library names when available (ELF `DT_SONAME`, PE export DLL name, Mach-O `LC_ID_DYLIB` install name) instead of filename-only normalization
   - architecture-correct output header stamping in ELF/PE/Mach-O writers based on resolved target
   - real PE compatibility-state wiring for `/NOENTRY`, `/DYNAMICBASE`, `/NXCOMPAT`, `/LARGEADDRESSAWARE`

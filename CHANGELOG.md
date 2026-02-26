@@ -112,10 +112,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - MOVW `UABS` / `SABS` / `PREL` families
     - starter TLS instruction-form relocation ID support (`TLSGD`, `TLSLD`, `TLSDESC`) with strict unsupported apply-path handling for non-implemented descriptor semantics
     - host-runtime-backed AArch64 TLS data relocation values for `TLS_DTPMOD`, `TLS_DTPREL`, and `TLS_TPREL` in non-shared links using deterministic TLS layout metadata
+    - shared-link AArch64 TLS data relocation behavior now distinguishes models: `TLS_DTPREL` can resolve from TLS layout metadata, shared-link `TLS_TPREL` returns invalid relocation, and shared-link `TLS_DTPMOD` remains not yet implemented
     - AArch64 TLSLE/TLSLD low12 offset instruction relocations (`ADD`/`LDST64`/`LDST128`) now route through host-runtime TLS offset helpers in non-shared links
     - `R_AARCH64_TLSDESC_CALL` now applies as a validated `BLR` preserve relocation even while broader TLSDESC descriptor/GOT semantics remain incomplete
   - host runtime shared-object ingestion now returns `ERR_INVALID_FORMAT` for unknown/unsupported shared-object payloads instead of silently succeeding
   - host runtime shared-object symbol ingest now validates target/ABI compatibility and shared-file kind before symbol ingestion (`ELF ET_DYN`, Windows PE DLL/COFF machine, Mach-O dylib CPU type)
+  - host runtime shared-object symbol ingest now filters non-exported metadata entries more strictly (ELF hidden/internal dynsyms; Mach-O private extern / debug-symbol entries)
   - host runtime needed-library recording now prefers embedded shared-library names (`DT_SONAME` / PE export DLL name / Mach-O install name) when present
 
 ### Changed
@@ -136,6 +138,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dust-built linker relocation apply path no longer blanket-rejects all AArch64 TLS instruction-family relocations; TLSLE/TLSLD low12 offset forms now apply in non-shared links via host TLS offset helpers.
 - Dust-built linker relocation apply path now permits `R_AARCH64_TLSDESC_CALL` (validated `BLR` preserve) instead of rejecting it with the remaining unsupported TLSDESC descriptor-sequence relocs.
 - Host shared-object symbol ingest no longer accepts cross-target or wrong-kind binaries as valid shared inputs during symbol-ingest resolution.
+- Host shared-object symbol ingest no longer treats hidden/private metadata symbols as exported shared symbols during ELF/Mach-O symbol-ingest fallback.
 - Host needed-library emission no longer depends only on filename normalization when embedded shared library names are available.
 
 ## [0.1.0] - 2026-02-12
