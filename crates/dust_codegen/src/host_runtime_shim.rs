@@ -99,8 +99,10 @@ const OBJECT_FORMAT_MACHO64: u32 = 3;
 const COFF_MACHINE_X86_64: u16 = 0x8664;
 const COFF_MACHINE_X86: u16 = 0x14c;
 const COFF_MACHINE_AARCH64: u16 = 0xaa64;
+const IMAGE_FILE_DLL: u16 = 0x2000;
 const MACH_CPU_X86_64: u32 = 0x0100_0007;
 const MACH_CPU_ARM64: u32 = 0x0100_000c;
+const MH_DYLIB: u32 = 0x6;
 
 const R_X86_64_NONE: u32 = 0;
 const R_X86_64_64: u32 = 1;
@@ -3067,6 +3069,23 @@ fn ingest_shared_elf_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
     if raw.get(4).copied().unwrap_or(0) != 2 || raw.get(5).copied().unwrap_or(0) != 1 {
         return ERR_INVALID_FORMAT;
     }
+    if target_is_windows(state.target) || target_is_macos(state.target) {
+        return ERR_UNSUPPORTED_TARGET;
+    }
+    let e_type = match read_u16_le_at(raw, 16) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if e_type != ET_DYN {
+        return ERR_INVALID_FORMAT;
+    }
+    let e_machine = match read_u16_le_at(raw, 18) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if e_machine != target_elf_machine(state.target) {
+        return ERR_UNSUPPORTED_TARGET;
+    }
 
     let shoff = match read_u64_le_at(raw, 40) {
         Some(v) => v as usize,
@@ -3178,6 +3197,9 @@ fn ingest_shared_pe_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
     if raw.len() < 0x40 || raw.get(0).copied() != Some(b'M') || raw.get(1).copied() != Some(b'Z') {
         return ERR_INVALID_FORMAT;
     }
+    if !target_is_windows(state.target) {
+        return ERR_UNSUPPORTED_TARGET;
+    }
     let pe_offset = match read_u32_le_at(raw, 0x3c) {
         Some(v) => v as usize,
         None => return ERR_INVALID_FORMAT,
@@ -3190,6 +3212,13 @@ fn ingest_shared_pe_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
     }
 
     let coff_off = pe_offset + 4;
+    let machine = match read_u16_le_at(raw, coff_off) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if machine != target_pe_machine(state.target) {
+        return ERR_UNSUPPORTED_TARGET;
+    }
     let section_count = match read_u16_le_at(raw, coff_off + 2) {
         Some(v) => v as usize,
         None => return ERR_INVALID_FORMAT,
@@ -3200,6 +3229,13 @@ fn ingest_shared_pe_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
     };
     let optional_off = coff_off + 20;
     if optional_off + optional_size > raw.len() {
+        return ERR_INVALID_FORMAT;
+    }
+    let characteristics = match read_u16_le_at(raw, coff_off + 18) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if characteristics & IMAGE_FILE_DLL == 0 {
         return ERR_INVALID_FORMAT;
     }
 
@@ -3282,11 +3318,17 @@ fn ingest_shared_coff_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
     if raw.len() < 20 {
         return ERR_INVALID_FORMAT;
     }
+    if !target_is_windows(state.target) {
+        return ERR_UNSUPPORTED_TARGET;
+    }
     let machine = match read_u16_le_at(raw, 0) {
         Some(v) => v,
         None => return ERR_INVALID_FORMAT,
     };
     if machine != COFF_MACHINE_X86_64 && machine != COFF_MACHINE_AARCH64 {
+        return ERR_UNSUPPORTED_TARGET;
+    }
+    if machine != target_pe_machine(state.target) {
         return ERR_UNSUPPORTED_TARGET;
     }
     let ptr_symtab = match read_u32_le_at(raw, 8) {
@@ -3345,6 +3387,9 @@ fn ingest_shared_macho_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
     if raw.len() < 32 {
         return ERR_INVALID_FORMAT;
     }
+    if !target_is_macos(state.target) {
+        return ERR_UNSUPPORTED_TARGET;
+    }
     let magic = match read_u32_le_at(raw, 0) {
         Some(v) => v,
         None => return ERR_INVALID_FORMAT,
@@ -3359,6 +3404,17 @@ fn ingest_shared_macho_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
     };
     if cpu_type != MACH_CPU_X86_64 && cpu_type != MACH_CPU_ARM64 {
         return ERR_UNSUPPORTED_TARGET;
+    }
+    let (target_cpu_type, _) = target_macho_cpu_type(state.target);
+    if cpu_type != target_cpu_type {
+        return ERR_UNSUPPORTED_TARGET;
+    }
+    let file_type = match read_u32_le_at(raw, 12) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    if file_type != MH_DYLIB {
+        return ERR_INVALID_FORMAT;
     }
 
     let ncmds = match read_u32_le_at(raw, 16) {

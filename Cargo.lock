@@ -71,6 +71,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
+name = "anyhow"
+version = "1.0.101"
+source = "git+https://github.com/dustsoftware/anyhow.git?rev=80bfe291b16071c70f141e90e67e7032d966826b#80bfe291b16071c70f141e90e67e7032d966826b"
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -229,7 +234,7 @@ version = "0.110.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "215f383d347e0f170d32ce5e8d9eae6336279865a9418853c8946118c54bdb43"
 dependencies = [
- "anyhow",
+ "anyhow 1.0.101 (registry+https://github.com/rust-lang/crates.io-index)",
  "cranelift-codegen",
  "cranelift-control",
 ]
@@ -240,7 +245,7 @@ version = "0.110.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "831bbb84d4ea2621195a836407686e0ba4083d47676eda470a01813e876b25eb"
 dependencies = [
- "anyhow",
+ "anyhow 1.0.101 (registry+https://github.com/rust-lang/crates.io-index)",
  "cranelift-codegen",
  "cranelift-control",
  "cranelift-module",
@@ -260,9 +265,9 @@ dependencies = [
 
 [[package]]
 name = "dust"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "anyhow",
+ "anyhow 1.0.101 (git+https://github.com/dustsoftware/anyhow.git?rev=80bfe291b16071c70f141e90e67e7032d966826b)",
  "clap",
  "dust_codegen",
  "dust_dir",
@@ -278,7 +283,7 @@ dependencies = [
 name = "dust_codegen"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "anyhow 1.0.101 (git+https://github.com/dustsoftware/anyhow.git?rev=80bfe291b16071c70f141e90e67e7032d966826b)",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-module",
@@ -289,21 +294,21 @@ dependencies = [
 
 [[package]]
 name = "dust_dir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "dust_frontend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "dust_semantics"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dust_dir",
  "dust_frontend",
@@ -575,8 +580,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 [[package]]
 name = "thiserror"
 version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+source = "git+https://github.com/dustsoftware/thiserror.git?rev=41938bd3a03a70d34ed8e53d99c89c770c7c9c41#41938bd3a03a70d34ed8e53d99c89c770c7c9c41"
 dependencies = [
  "thiserror-impl",
 ]
@@ -584,8 +588,7 @@ dependencies = [
 [[package]]
 name = "thiserror-impl"
 version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+source = "git+https://github.com/dustsoftware/thiserror.git?rev=41938bd3a03a70d34ed8e53d99c89c770c7c9c41#41938bd3a03a70d34ed8e53d99c89c770c7c9c41"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -26,7 +26,7 @@ The following existing files remain part of the repository history and analysis 
 ## Release Notes
 
 Compiler change history is tracked in `../CHANGELOG.md`.
-Recent host-link/runtime parity work for Dust-built tooling is summarized in `status_and_limitations.md`, including stricter linker-script semantics, expanded target alias coverage, compatibility-state behavior wiring, and newer AArch64 ELF relocation/TLS starter coverage used by Dust-built `dustlink`.
+Recent host-link/runtime parity work for Dust-built tooling is summarized in `status_and_limitations.md`, including stricter linker-script semantics, expanded target alias coverage, compatibility-state behavior wiring, newer AArch64 ELF relocation/TLS coverage (including TLSLE/TLSLD low12 offset forms), and stricter shared-object target/ABI validation used by Dust-built `dustlink`.
 
 ## Normative Language Reference
 

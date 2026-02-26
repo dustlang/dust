@@ -112,7 +112,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - MOVW `UABS` / `SABS` / `PREL` families
     - starter TLS instruction-form relocation ID support (`TLSGD`, `TLSLD`, `TLSDESC`) with strict unsupported apply-path handling for non-implemented descriptor semantics
     - host-runtime-backed AArch64 TLS data relocation values for `TLS_DTPMOD`, `TLS_DTPREL`, and `TLS_TPREL` in non-shared links using deterministic TLS layout metadata
+    - AArch64 TLSLE/TLSLD low12 offset instruction relocations (`ADD`/`LDST64`/`LDST128`) now route through host-runtime TLS offset helpers in non-shared links
   - host runtime shared-object ingestion now returns `ERR_INVALID_FORMAT` for unknown/unsupported shared-object payloads instead of silently succeeding
+  - host runtime shared-object symbol ingest now validates target/ABI compatibility and shared-file kind before symbol ingestion (`ELF ET_DYN`, Windows PE DLL/COFF machine, Mach-O dylib CPU type)
 
 ### Changed
 
@@ -129,6 +131,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Host linker-script runtime no longer silently accepts unknown linker-script directives.
 - Host linker compatibility/no-op flag handling now surfaces diagnostics instead of silent acceptance.
 - Dust-built linker relocation parsing/validation now accepts and processes a broader AArch64 ELF relocation set (including MOVW and TLS starter forms) instead of rejecting them during ingest.
+- Dust-built linker relocation apply path no longer blanket-rejects all AArch64 TLS instruction-family relocations; TLSLE/TLSLD low12 offset forms now apply in non-shared links via host TLS offset helpers.
+- Host shared-object symbol ingest no longer accepts cross-target or wrong-kind binaries as valid shared inputs during symbol-ingest resolution.
 
 ## [0.1.0] - 2026-02-12
 
