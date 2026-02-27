@@ -1,19 +1,20 @@
-// crates/dust_codegen/src/lib.rs
+// File: lib.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Native codegen for DPL v0.1 (executable milestone).
+//   This crate enables:
+//     - `dust build <file.ds>` produces a native executable (ELF/Mach-O/PE)
+//     - `dust run <file.ds>` builds then runs it
 //
-// Native codegen for DPL v0.1 (executable milestone)
+//   v0.1 executable subset implemented here:
+//     - A K-regime process named `main`
+//     - Its body contains zero or more `emit "<string>"` effects
 //
-// What this enables:
-// - `dust build <file.ds>` produces a native executable (ELF/Mach-O/PE)
-// - `dust run <file.ds>` builds then runs it
+//   Backend:
+//     - Cranelift -> object file -> system linker (cc/clang/link.exe)
 //
-// v0.1 executable subset implemented here:
-// - A K-regime process named `main`
-// - Its body contains zero or more `emit "<string>"` effects
-//
-// Backend:
-// - Cranelift -> object file -> system linker (cc/clang/link.exe)
-//
-// NOTE: Q and Φ are not codegen-enabled here (they should be rejected earlier, but we also fail here).
+//   NOTE: Q and Φ are not codegen-enabled here (they should be rejected earlier,
+//   but we also fail here).
 
 use anyhow::{anyhow, bail, Context, Result};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -22,11 +23,11 @@ use cranelift_codegen::ir::{
 };
 use cranelift_codegen::isa;
 use cranelift_codegen::settings;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_frontend::Variable;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use dust_dir::{DirProgram, DirProc, DirStmt};
+use dust_dir::{DirProc, DirProgram, DirStmt};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -73,7 +74,6 @@ fn find_k_main(dir: &DirProgram) -> Result<DirProc> {
     Ok(entry.proc)
 }
 
-
 fn extract_emit_strings(stmts: &[DirStmt]) -> Result<Vec<String>> {
     let mut out = Vec::new();
 
@@ -90,7 +90,6 @@ fn extract_emit_strings(stmts: &[DirStmt]) -> Result<Vec<String>> {
 
     Ok(out)
 }
-
 
 /// `dust_semantics::lower_to_dir` serializes string literals as `format!("{:?}", s)`,
 /// e.g. "\"Hello\\nWorld\"" (quoted + escaped).
@@ -157,22 +156,19 @@ impl HostProcFrame {
         var
     }
 
-    fn set_var(
-        &mut self,
-        builder: &mut FunctionBuilder,
-        name: &str,
-        value: Value,
-        word_ty: Type,
-    ) {
+    fn set_var(&mut self, builder: &mut FunctionBuilder, name: &str, value: Value, word_ty: Type) {
         let var = self.ensure_var(builder, name, word_ty);
         builder.def_var(var, value);
     }
 
     fn get_var(&self, builder: &mut FunctionBuilder, name: &str) -> Result<Value> {
-        let var = self
-            .vars
-            .get(name)
-            .ok_or_else(|| anyhow!("unknown identifier '{}' in forge '{}'", name, self.current_forge))?;
+        let var = self.vars.get(name).ok_or_else(|| {
+            anyhow!(
+                "unknown identifier '{}' in forge '{}'",
+                name,
+                self.current_forge
+            )
+        })?;
         Ok(builder.use_var(*var))
     }
 }
@@ -379,9 +375,12 @@ fn compile_host_proc(
         b.finalize();
     }
 
-    module
-        .define_function(func_id, &mut ctx)
-        .with_context(|| format!("define host proc {}::{}", proc_ref.forge, proc_ref.proc.name))?;
+    module.define_function(func_id, &mut ctx).with_context(|| {
+        format!(
+            "define host proc {}::{}",
+            proc_ref.forge, proc_ref.proc.name
+        )
+    })?;
     module.clear_context(&mut ctx);
     Ok(())
 }
@@ -433,14 +432,30 @@ fn lower_stmt(
     match stmt {
         DirStmt::Let { name, expr } => {
             let value = lower_expr(
-                module, proc_index, proc_ids, imports, string_data, b, frame, expr, word_ty,
+                module,
+                proc_index,
+                proc_ids,
+                imports,
+                string_data,
+                b,
+                frame,
+                expr,
+                word_ty,
             )?;
             frame.set_var(b, name, value, word_ty);
             Ok(true)
         }
         DirStmt::Assign { target, expr } => {
             let value = lower_expr(
-                module, proc_index, proc_ids, imports, string_data, b, frame, expr, word_ty,
+                module,
+                proc_index,
+                proc_ids,
+                imports,
+                string_data,
+                b,
+                frame,
+                expr,
+                word_ty,
             )?;
             frame.set_var(b, target, value, word_ty);
             Ok(true)
@@ -451,7 +466,16 @@ fn lower_stmt(
             result,
         } => {
             let value = lower_call(
-                module, proc_index, proc_ids, imports, string_data, b, frame, target, args, word_ty,
+                module,
+                proc_index,
+                proc_ids,
+                imports,
+                string_data,
+                b,
+                frame,
+                target,
+                args,
+                word_ty,
             )?;
             if let Some(name) = result {
                 frame.set_var(b, name, value, word_ty);
@@ -469,7 +493,15 @@ fn lower_stmt(
         }
         DirStmt::Effect { kind, payload } if kind == "expr" => {
             let _ = lower_expr(
-                module, proc_index, proc_ids, imports, string_data, b, frame, payload, word_ty,
+                module,
+                proc_index,
+                proc_ids,
+                imports,
+                string_data,
+                b,
+                frame,
+                payload,
+                word_ty,
             )?;
             Ok(true)
         }
@@ -477,7 +509,15 @@ fn lower_stmt(
         DirStmt::Return { expr } => {
             let value = if let Some(raw) = expr {
                 lower_expr(
-                    module, proc_index, proc_ids, imports, string_data, b, frame, raw, word_ty,
+                    module,
+                    proc_index,
+                    proc_ids,
+                    imports,
+                    string_data,
+                    b,
+                    frame,
+                    raw,
+                    word_ty,
                 )?
             } else {
                 b.ins().iconst(word_ty, 0)
@@ -491,7 +531,15 @@ fn lower_stmt(
             else_body,
         } => {
             let cond_value = lower_expr(
-                module, proc_index, proc_ids, imports, string_data, b, frame, condition, word_ty,
+                module,
+                proc_index,
+                proc_ids,
+                imports,
+                string_data,
+                b,
+                frame,
+                condition,
+                word_ty,
             )?;
             let cond_bool = truthy_value(b, cond_value, word_ty);
             let then_block = b.create_block();
@@ -554,7 +602,15 @@ fn lower_stmt(
             b.ins().jump(header, &[]);
             b.switch_to_block(header);
             let cond_value = lower_expr(
-                module, proc_index, proc_ids, imports, string_data, b, frame, condition, word_ty,
+                module,
+                proc_index,
+                proc_ids,
+                imports,
+                string_data,
+                b,
+                frame,
+                condition,
+                word_ty,
             )?;
             let cond_bool = truthy_value(b, cond_value, word_ty);
             b.ins().brif(cond_bool, body_block, &[], exit_block, &[]);
@@ -592,10 +648,26 @@ fn lower_stmt(
             body,
         } => {
             let start_value = lower_expr(
-                module, proc_index, proc_ids, imports, string_data, b, frame, start, word_ty,
+                module,
+                proc_index,
+                proc_ids,
+                imports,
+                string_data,
+                b,
+                frame,
+                start,
+                word_ty,
             )?;
             let end_value = lower_expr(
-                module, proc_index, proc_ids, imports, string_data, b, frame, end, word_ty,
+                module,
+                proc_index,
+                proc_ids,
+                imports,
+                string_data,
+                b,
+                frame,
+                end,
+                word_ty,
             )?;
             frame.set_var(b, var, start_value, word_ty);
 
@@ -683,7 +755,15 @@ fn lower_expr(
 
     if let Some(inner) = strip_wrapping_parens(trimmed) {
         return lower_expr(
-            module, proc_index, proc_ids, imports, string_data, b, frame, &inner, word_ty,
+            module,
+            proc_index,
+            proc_ids,
+            imports,
+            string_data,
+            b,
+            frame,
+            &inner,
+            word_ty,
         );
     }
 
@@ -704,24 +784,57 @@ fn lower_expr(
 
     if let Some((op, operand)) = parse_unary_expr(trimmed) {
         let value = lower_expr(
-            module, proc_index, proc_ids, imports, string_data, b, frame, &operand, word_ty,
+            module,
+            proc_index,
+            proc_ids,
+            imports,
+            string_data,
+            b,
+            frame,
+            &operand,
+            word_ty,
         )?;
         return lower_unary_op(b, &op, value, word_ty);
     }
 
     if let Some((lhs, op, rhs)) = split_binary_expr(trimmed) {
         let lhs_value = lower_expr(
-            module, proc_index, proc_ids, imports, string_data, b, frame, &lhs, word_ty,
+            module,
+            proc_index,
+            proc_ids,
+            imports,
+            string_data,
+            b,
+            frame,
+            &lhs,
+            word_ty,
         )?;
         let rhs_value = lower_expr(
-            module, proc_index, proc_ids, imports, string_data, b, frame, &rhs, word_ty,
+            module,
+            proc_index,
+            proc_ids,
+            imports,
+            string_data,
+            b,
+            frame,
+            &rhs,
+            word_ty,
         )?;
         return lower_binary_op(b, &op, lhs_value, rhs_value, word_ty);
     }
 
     if let Some((target, args)) = parse_call_expr_runtime(trimmed)? {
         return lower_call(
-            module, proc_index, proc_ids, imports, string_data, b, frame, &target, &args, word_ty,
+            module,
+            proc_index,
+            proc_ids,
+            imports,
+            string_data,
+            b,
+            frame,
+            &target,
+            &args,
+            word_ty,
         );
     }
 
@@ -828,7 +941,15 @@ fn lower_call(
     let mut arg_values = Vec::with_capacity(args.len());
     for arg in args {
         let value = lower_expr(
-            module, proc_index, proc_ids, imports, string_data, b, frame, arg, word_ty,
+            module,
+            proc_index,
+            proc_ids,
+            imports,
+            string_data,
+            b,
+            frame,
+            arg,
+            word_ty,
         )?;
         arg_values.push(value);
     }
@@ -854,8 +975,7 @@ fn lower_call(
 
     let callee_ref = module.declare_func_in_func(func_id, b.func);
     let call = b.ins().call(callee_ref, &arg_values);
-    Ok(b
-        .inst_results(call)
+    Ok(b.inst_results(call)
         .first()
         .copied()
         .unwrap_or_else(|| b.ins().iconst(word_ty, 0)))
@@ -1645,8 +1765,8 @@ fn run_link_attempts(attempts: Vec<LinkAttempt>) -> Result<()> {
 }
 
 pub fn build_object_file(dir: &DirProgram, out_path: &Path) -> Result<PathBuf> {
-    let entry =
-        find_k_entry_scoped(dir, "main").context("DIR does not contain a codegen-capable K::main")?;
+    let entry = find_k_entry_scoped(dir, "main")
+        .context("DIR does not contain a codegen-capable K::main")?;
     let emit_strings = extract_emit_strings_scoped(dir, &entry, true)?;
     let obj_bytes = build_object_for_entry(&emit_strings, &Triple::host(), "main", false)?;
 
@@ -1660,8 +1780,8 @@ pub fn build_object_file_for_target(
     out_path: &Path,
     target_triple: &str,
 ) -> Result<PathBuf> {
-    let entry =
-        find_k_entry_scoped(dir, "main").context("DIR does not contain a codegen-capable K::main")?;
+    let entry = find_k_entry_scoped(dir, "main")
+        .context("DIR does not contain a codegen-capable K::main")?;
     let emit_strings = extract_emit_strings_scoped(dir, &entry, true)?;
     let triple: Triple = target_triple
         .parse()
@@ -1675,8 +1795,8 @@ pub fn build_object_file_for_target(
 }
 
 pub fn build_bare_metal_kernel(dir: &DirProgram, out_path: &Path) -> Result<PathBuf> {
-    let entry =
-        find_k_entry_scoped(dir, "main").context("DIR does not contain a codegen-capable K::main")?;
+    let entry = find_k_entry_scoped(dir, "main")
+        .context("DIR does not contain a codegen-capable K::main")?;
     let emit_strings = extract_emit_strings_scoped(dir, &entry, true)?;
     let bin = build_flat_binary(&emit_strings)?;
     fs::write(out_path, bin).with_context(|| format!("write kernel {:?}", out_path))?;
@@ -2168,7 +2288,11 @@ fn resolve_callee_proc(
                 });
             }
         }
-        bail!("callee K::{} not found in forge '{}'", proc_name, forge_name);
+        bail!(
+            "callee K::{} not found in forge '{}'",
+            proc_name,
+            forge_name
+        );
     }
 
     if let Some(forge_map) = proc_index.by_forge.get(current_forge) {
@@ -2300,13 +2424,16 @@ fn build_object_for_entry(
                         .saturating_add(col.saturating_mul(2));
                     let cell_ptr = b.ins().iconst(ptr_ty, i64::from(cell_addr));
                     let glyph = b.ins().iconst(cranelift_codegen::ir::types::I8, ch as i64);
-                    b.ins().store(cranelift_codegen::ir::MemFlags::new(), glyph, cell_ptr, 0);
+                    b.ins()
+                        .store(cranelift_codegen::ir::MemFlags::new(), glyph, cell_ptr, 0);
 
                     let attr_ptr = b.ins().iconst(ptr_ty, i64::from(cell_addr + 1));
-                    let attr = b
-                        .ins()
-                        .iconst(cranelift_codegen::ir::types::I8, i64::from(VGA_ATTR_DEFAULT));
-                    b.ins().store(cranelift_codegen::ir::MemFlags::new(), attr, attr_ptr, 0);
+                    let attr = b.ins().iconst(
+                        cranelift_codegen::ir::types::I8,
+                        i64::from(VGA_ATTR_DEFAULT),
+                    );
+                    b.ins()
+                        .store(cranelift_codegen::ir::MemFlags::new(), attr, attr_ptr, 0);
                     col = col.saturating_add(1);
                 }
                 row = row.saturating_add(1);
@@ -2381,8 +2508,3 @@ fn emit_mov_byte_abs(out: &mut Vec<u8>, addr: u32, value: u8) {
     out.extend_from_slice(&addr.to_le_bytes());
     out.push(value);
 }
-
-
-
-
-

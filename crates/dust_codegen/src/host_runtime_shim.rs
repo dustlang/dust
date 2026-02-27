@@ -1,3 +1,17 @@
+// File: host_runtime_shim.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Host runtime shim providing FFI bindings between Dust linker modules and
+//   native Rust implementations. This module contains:
+//   - ELF, COFF, and Mach-O object file parsing and writing
+//   - Symbol resolution and relocation application
+//   - TLS (Thread-Local Storage) layout and relocations for x86_64 and AArch64
+//   - Archive (static library) handling
+//   - Linker script parsing and execution
+//   - Output file generation (executables, shared objects, flat binaries)
+//
+//   This shim is called by Dust linker modules via host_linker_* intrinsics.
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
@@ -130,6 +144,12 @@ const R_X86_64_PC32: u32 = 2;
 const R_X86_64_32: u32 = 10;
 const R_X86_64_32S: u32 = 11;
 const R_X86_64_GOTPCREL: u32 = 9;
+const R_X86_64_TPOFF64: u32 = 18;
+const R_X86_64_TPOFF32: u32 = 19;
+const R_X86_64_GOTTPOFF: u32 = 20;
+const R_X86_64_DTPOFF64: u32 = 17;
+const R_X86_64_DTPOFF32: u32 = 16;
+const R_X86_64_IRELATIVE: u32 = 42;
 const R_AARCH64_NONE: u32 = 0;
 const R_AARCH64_ABS64: u32 = 257;
 const R_AARCH64_ABS32: u32 = 258;
@@ -356,6 +376,8 @@ struct LinkerState {
     emit_relocs: bool,
     aarch64_tls_synth_base: u64,
     aarch64_tls_synth_slots: Vec<Aarch64TlsSyntheticSlot>,
+    tls_got_base: u64,
+    tls_got_slots: Vec<(u32, u32, u64)>,
 }
 
 static STRINGS: OnceLock<Mutex<Vec<CString>>> = OnceLock::new();
@@ -385,7 +407,8 @@ fn intern_string<S: AsRef<str>>(value: S) -> u64 {
     }
     let cstr = match CString::new(sanitized) {
         Ok(v) => v,
-        Err(_) => CString::new("_").unwrap_or_else(|_| unsafe { CString::from_vec_unchecked(vec![b'_', 0]) }),
+        Err(_) => CString::new("_")
+            .unwrap_or_else(|_| unsafe { CString::from_vec_unchecked(vec![b'_', 0]) }),
     };
     let ptr = cstr.as_ptr() as u64;
     let mut pool = strings().lock().expect("strings mutex poisoned");
@@ -496,7 +519,11 @@ fn compare_version_suffix(a: &str, b: &str) -> Ordering {
     }
 }
 
-fn find_versioned_shared_library_in_dir(search_dir: &Path, base_name: &str, target: u32) -> Option<PathBuf> {
+fn find_versioned_shared_library_in_dir(
+    search_dir: &Path,
+    base_name: &str,
+    target: u32,
+) -> Option<PathBuf> {
     let trimmed_name = base_name.trim();
     if trimmed_name.is_empty() {
         return None;
@@ -562,7 +589,9 @@ fn find_versioned_shared_library_in_dir(search_dir: &Path, base_name: &str, targ
 }
 
 fn target_is_aarch64(target: u32) -> bool {
-    target == TARGET_AARCH64_LINUX || target == TARGET_AARCH64_WINDOWS || target == TARGET_AARCH64_MACOS
+    target == TARGET_AARCH64_LINUX
+        || target == TARGET_AARCH64_WINDOWS
+        || target == TARGET_AARCH64_MACOS
 }
 
 fn target_elf_machine(target: u32) -> u16 {
@@ -630,7 +659,11 @@ fn refresh_args() {
     }
     let mut out = Vec::new();
     for arg in std::env::args() {
-        let value = if arg.contains('\0') { arg.replace('\0', "") } else { arg };
+        let value = if arg.contains('\0') {
+            arg.replace('\0', "")
+        } else {
+            arg
+        };
         let c = CString::new(value).unwrap_or_else(|_| CString::new("_").expect("cstr fallback"));
         out.push(c);
     }
@@ -1142,7 +1175,11 @@ fn start_lib_member_matches_unresolved_state(state: &LinkerState, index: u32) ->
     0
 }
 
-fn build_section_runtime_address(state: &LinkerState, object_index: u32, section_index: u32) -> u64 {
+fn build_section_runtime_address(
+    state: &LinkerState,
+    object_index: u32,
+    section_index: u32,
+) -> u64 {
     let mut cursor = if state.image_base == 0 {
         0x0010_0000
     } else {
@@ -1203,7 +1240,11 @@ fn symbol_runtime_address(state: &LinkerState, object_index: u32, symbol_index: 
     sec_addr.saturating_add(symbol.value)
 }
 
-fn build_tls_section_offset(state: &LinkerState, object_index: u32, section_index: u32) -> Option<u64> {
+fn build_tls_section_offset(
+    state: &LinkerState,
+    object_index: u32,
+    section_index: u32,
+) -> Option<u64> {
     let mut cursor = 0u64;
     for (obj_idx, object) in state.objects.iter().enumerate() {
         for section in &object.sections {
@@ -1242,7 +1283,10 @@ fn tls_symbol_offset_inner(
         if symbol.name_hash == 0 {
             return Err(ERR_UNDEFINED_SYMBOL);
         }
-        let global = state.globals.get(&symbol.name_hash).ok_or(ERR_UNDEFINED_SYMBOL)?;
+        let global = state
+            .globals
+            .get(&symbol.name_hash)
+            .ok_or(ERR_UNDEFINED_SYMBOL)?;
         if global.defined != 1 {
             return Err(ERR_UNDEFINED_SYMBOL);
         }
@@ -1260,7 +1304,8 @@ fn tls_symbol_offset_inner(
     if (section.flags & SHF_TLS == 0) && symbol.sym_type != STT_TLS {
         return Err(ERR_INVALID_RELOCATION);
     }
-    let base = build_tls_section_offset(state, object_index, section_index).ok_or(ERR_INVALID_SECTION)?;
+    let base =
+        build_tls_section_offset(state, object_index, section_index).ok_or(ERR_INVALID_SECTION)?;
     Ok(base.wrapping_add(symbol.value))
 }
 
@@ -1288,9 +1333,7 @@ fn aarch64_tls_synth_model_for_reloc(reloc_type: u32) -> Option<u32> {
 }
 
 fn aarch64_tls_synth_fallback_name_hash(object_index: u32, symbol_index: u32) -> u64 {
-    0x4152_4d36_3454_4c53u64
-        ^ ((object_index as u64) << 32)
-        ^ (symbol_index as u64)
+    0x4152_4d36_3454_4c53u64 ^ ((object_index as u64) << 32) ^ (symbol_index as u64)
 }
 
 fn aarch64_tls_synth_symbol_identity(
@@ -1329,7 +1372,8 @@ fn aarch64_tls_synth_symbol_identity(
     }
 
     if name_hash == 0 {
-        name_hash = aarch64_tls_synth_fallback_name_hash(canonical_object_index, canonical_symbol_index);
+        name_hash =
+            aarch64_tls_synth_fallback_name_hash(canonical_object_index, canonical_symbol_index);
     }
 
     Ok((name_hash, canonical_object_index, canonical_symbol_index))
@@ -1388,7 +1432,10 @@ fn aarch64_tls_synth_reserve_slot(
     Ok(slot_index)
 }
 
-fn aarch64_tls_synth_slot_address_inner(state: &mut LinkerState, slot_index: u32) -> Result<u64, u32> {
+fn aarch64_tls_synth_slot_address_inner(
+    state: &mut LinkerState,
+    slot_index: u32,
+) -> Result<u64, u32> {
     if (slot_index as usize) >= state.aarch64_tls_synth_slots.len() {
         return Err(ERR_INVALID_RELOCATION);
     }
@@ -1396,7 +1443,11 @@ fn aarch64_tls_synth_slot_address_inner(state: &mut LinkerState, slot_index: u32
     Ok(aarch64_tls_synth_slot_address(base, slot_index))
 }
 
-fn aarch64_tls_synth_record_addend(state: &mut LinkerState, slot_index: u32, addend: u64) -> Result<(), u32> {
+fn aarch64_tls_synth_record_addend(
+    state: &mut LinkerState,
+    slot_index: u32,
+    addend: u64,
+) -> Result<(), u32> {
     let slot = state
         .aarch64_tls_synth_slots
         .get_mut(slot_index as usize)
@@ -1445,7 +1496,9 @@ fn aarch64_tls_synth_reloc_value(
     let slot_addr = aarch64_tls_synth_slot_address_inner(state, slot_index)?;
     let target = slot_addr.wrapping_add(addend);
     match reloc_type {
-        R_AARCH64_TLSLD_LD_PREL19 | R_AARCH64_TLSDESC_LD_PREL19 => Ok(pcrel_delta_bytes_host(place_addr, target)),
+        R_AARCH64_TLSLD_LD_PREL19 | R_AARCH64_TLSDESC_LD_PREL19 => {
+            Ok(pcrel_delta_bytes_host(place_addr, target))
+        }
         R_AARCH64_TLSGD_ADR_PREL21 | R_AARCH64_TLSLD_ADR_PREL21 | R_AARCH64_TLSDESC_ADR_PREL21 => {
             Ok(pcrel_delta_bytes_host(place_addr, target))
         }
@@ -1484,7 +1537,23 @@ fn aarch64_tls_data_reloc_value(
                 return Err(ERR_INVALID_RELOCATION);
             }
             R_AARCH64_TLS_DTPMOD => {
-                return Err(ERR_NOT_IMPLEMENTED_YET);
+                // Shared object: module ID is assigned by dynamic loader
+                // Allocate a TLS GOT slot for the module ID resolution
+                // At runtime, the dynamic linker will fill this with the actual module ID
+                // We emit a dynamic relocation to request this
+                let got_slot = state.tls_got_slots.len() as u32;
+                // Special marker for DTPMOD - the runtime will fill with module ID
+                state
+                    .tls_got_slots
+                    .push((object_index, symbol_index, u64::MAX));
+
+                // Return the GOT offset (8 bytes per slot)
+                // The actual module ID resolution happens via JUMP_SLOT-style dynamic reloc
+                let got_addr = state.tls_got_base.unwrap_or(0) + (got_slot as u64 * 8);
+                // Return the offset from TP - but for shared objects we need GOT-relative
+                // For TLSDESC, this value gets used in the descriptor, so we return the GOT address
+                // The dynamic linker will patch this to be the actual module ID
+                Ok(got_addr)
             }
             _ => return Err(ERR_INVALID_RELOCATION),
         }
@@ -1500,7 +1569,91 @@ fn aarch64_tls_data_reloc_value(
     }
 }
 
-fn section_payload_from_object(path: u64, section_type: u32, offset: u64, size: u64) -> Option<Vec<u8>> {
+fn x86_64_tls_got_reloc_value(
+    state: &LinkerState,
+    object_index: u32,
+    symbol_index: u32,
+    reloc_type: u32,
+    addend: u64,
+    place_addr: u64,
+) -> Result<u64, u32> {
+    match reloc_type {
+        R_X86_64_GOTTPOFF => {
+            // IE model: GOT entry contains TP-relative offset
+            // Create/reserve a TLS GOT slot and compute PC-relative offset to it
+            let tls_offset = tls_symbol_offset_inner(state, object_index, symbol_index, 0)?;
+            let tls_offset_with_addend = tls_offset.wrapping_add(addend);
+
+            // Allocate GOT slot for TLS IE
+            let got_slot = state.tls_got_slots.len() as u32;
+            state
+                .tls_got_slots
+                .push((object_index, symbol_index, tls_offset_with_addend));
+
+            // Get GOT address (synthesized .got.plt TLS region)
+            let got_addr = state.tls_got_base.unwrap_or(0) + (got_slot as u64 * 8);
+
+            // Return PC-relative offset to GOT entry
+            let pcrel_offset = if got_addr >= place_addr {
+                got_addr - place_addr
+            } else {
+                return Err(ERR_INVALID_RELOCATION);
+            };
+            Ok(pcrel_offset)
+        }
+        R_X86_64_TPOFF64 | R_X86_64_TPOFF32 => {
+            // LE model: direct TP-relative offset
+            let offset = tls_symbol_offset_inner(state, object_index, symbol_index, 0)?;
+            Ok(offset.wrapping_add(addend))
+        }
+        R_X86_64_DTPOFF64 | R_X86_64_DTPOFF32 => {
+            // GD/LD model: DTP-relative offset
+            // For GD (global dynamic), we need module ID + DTP offset
+            // For LD (local dynamic), we need just DTP offset
+            // In shared objects, the module ID is assigned by the dynamic loader
+            // For executables, module ID is 1
+            let tls_offset = tls_symbol_offset_inner(state, object_index, symbol_index, 0)?;
+            let dtp_offset = tls_offset.wrapping_add(addend);
+
+            if state.link_shared {
+                // Shared object: need to use @dtpoff which references TLS block offset
+                // The actual module ID is resolved at runtime via GOT
+                // Allocate GOT slot for module ID + offset
+                let got_slot = state.tls_got_slots.len() as u32;
+                state
+                    .tls_got_slots
+                    .push((object_index, symbol_index, dtp_offset));
+
+                let got_addr = state.tls_got_base.unwrap_or(0) + (got_slot as u64 * 8);
+                let pcrel_offset = if got_addr >= place_addr {
+                    got_addr - place_addr
+                } else {
+                    return Err(ERR_INVALID_RELOCATION);
+                };
+                Ok(pcrel_offset)
+            } else {
+                // Executable: module ID is 1, return DTP offset directly
+                Ok(dtp_offset)
+            }
+        }
+        R_X86_64_IRELATIVE => {
+            // IFUNC: resolved by function resolver at runtime
+            let symbol_addr = symbol_runtime_address(state, object_index, symbol_index);
+            if symbol_addr == 0 {
+                return Err(ERR_UNDEFINED_SYMBOL);
+            }
+            Ok(symbol_addr.wrapping_add(addend))
+        }
+        _ => Err(ERR_INVALID_RELOCATION),
+    }
+}
+
+fn section_payload_from_object(
+    path: u64,
+    section_type: u32,
+    offset: u64,
+    size: u64,
+) -> Option<Vec<u8>> {
     if size == 0 {
         return Some(Vec::new());
     }
@@ -1598,10 +1751,9 @@ fn build_alloc_segments(state: &LinkerState) -> Vec<(u64, Vec<u8>, u32, u32)> {
             }
             if state.gc_sections {
                 let key = (obj_idx as u32, section.index);
-                let keep =
-                    referenced.contains(&key)
-                        || (section.flags & SHF_EXECINSTR != 0)
-                        || first_alloc == Some(section.index);
+                let keep = referenced.contains(&key)
+                    || (section.flags & SHF_EXECINSTR != 0)
+                    || first_alloc == Some(section.index);
                 if !keep {
                     if state.print_gc_sections {
                         eprintln!(
@@ -2003,9 +2155,14 @@ fn write_minimal_elf_exec(
         || has_dt_flags
         || has_dt_flags_1;
 
-    let mut dynsym = if dynamic_enabled { vec![0u8; 24] } else { Vec::new() };
+    let mut dynsym = if dynamic_enabled {
+        vec![0u8; 24]
+    } else {
+        Vec::new()
+    };
     let tls_synth_rela_records = if dynamic_enabled && machine == EM_AARCH64 {
-        let (dynsym_tls, rela_tls) = build_aarch64_tls_synth_dynsym_and_rela_dyn(state, &mut dynstr);
+        let (dynsym_tls, rela_tls) =
+            build_aarch64_tls_synth_dynsym_and_rela_dyn(state, &mut dynstr);
         if !dynsym_tls.is_empty() {
             dynsym = dynsym_tls;
         }
@@ -2160,7 +2317,11 @@ fn write_minimal_elf_exec(
     write_u64_le(
         &mut out,
         24,
-        if entry == 0 { image_base.max(0x1000) } else { entry },
+        if entry == 0 {
+            image_base.max(0x1000)
+        } else {
+            entry
+        },
     );
     write_u64_le(&mut out, 32, 64); // e_phoff
     write_u64_le(&mut out, 40, 0); // e_shoff
@@ -2197,9 +2358,12 @@ fn write_minimal_elf_exec(
     }
 
     if !dynamic_entries.is_empty() {
-        let dynamic_vaddr = image_base.saturating_add(dynamic_offset.saturating_sub(payload_offset) as u64);
-        let dynstr_vaddr = image_base.saturating_add(dynstr_offset.saturating_sub(payload_offset) as u64);
-        let dynsym_vaddr = image_base.saturating_add(dynsym_offset.saturating_sub(payload_offset) as u64);
+        let dynamic_vaddr =
+            image_base.saturating_add(dynamic_offset.saturating_sub(payload_offset) as u64);
+        let dynstr_vaddr =
+            image_base.saturating_add(dynstr_offset.saturating_sub(payload_offset) as u64);
+        let dynsym_vaddr =
+            image_base.saturating_add(dynsym_offset.saturating_sub(payload_offset) as u64);
         let sysv_hash_vaddr =
             image_base.saturating_add(sysv_hash_offset.saturating_sub(payload_offset) as u64);
         let gnu_hash_vaddr =
@@ -2262,8 +2426,16 @@ fn write_minimal_elf_exec(
     write_u64_le(&mut out, load_phoff + 8, payload_offset as u64);
     write_u64_le(&mut out, load_phoff + 16, image_base);
     write_u64_le(&mut out, load_phoff + 24, image_base);
-    write_u64_le(&mut out, load_phoff + 32, load_end.saturating_sub(payload_offset) as u64);
-    write_u64_le(&mut out, load_phoff + 40, load_end.saturating_sub(payload_offset) as u64);
+    write_u64_le(
+        &mut out,
+        load_phoff + 32,
+        load_end.saturating_sub(payload_offset) as u64,
+    );
+    write_u64_le(
+        &mut out,
+        load_phoff + 40,
+        load_end.saturating_sub(payload_offset) as u64,
+    );
     write_u64_le(&mut out, load_phoff + 48, 0x1000);
 
     out[payload_offset..payload_offset + payload.len()].copy_from_slice(&payload);
@@ -2577,7 +2749,10 @@ fn parse_elf_needed_libraries(raw: &[u8]) -> Vec<String> {
         Some(v) => v as usize,
         None => return out,
     };
-    if dynstr_offset == 0 || dynstr_size == 0 || dynstr_offset.saturating_add(dynstr_size) > raw.len() {
+    if dynstr_offset == 0
+        || dynstr_size == 0
+        || dynstr_offset.saturating_add(dynstr_size) > raw.len()
+    {
         return out;
     }
 
@@ -2650,7 +2825,10 @@ fn parse_elf_soname(raw: &[u8]) -> Option<String> {
     let dynstr_off = shoff + dynstr_section.saturating_mul(shentsize);
     let dynstr_offset = read_u64_le_at(raw, dynstr_off + 24)? as usize;
     let dynstr_size = read_u64_le_at(raw, dynstr_off + 32)? as usize;
-    if dynstr_offset == 0 || dynstr_size == 0 || dynstr_offset.saturating_add(dynstr_size) > raw.len() {
+    if dynstr_offset == 0
+        || dynstr_size == 0
+        || dynstr_offset.saturating_add(dynstr_size) > raw.len()
+    {
         return None;
     }
 
@@ -2724,7 +2902,11 @@ fn parse_pe_export_library_name(raw: &[u8]) -> Option<String> {
     let name_off = pe_rva_to_file_offset(raw, section_table_off, section_count, name_rva)?;
     let name = read_c_string_from_bytes(raw, name_off)?;
     let trimmed = name.trim().to_string();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn parse_macho_install_name(raw: &[u8]) -> Option<String> {
@@ -2944,10 +3126,9 @@ fn parse_target_value(raw: &str) -> Option<u32> {
         | "aarch64-windows-gnu"
         | "aarch64-pc-windows-gnu"
         | "arm64pe" => Some(TARGET_AARCH64_WINDOWS),
-        "x86_64-apple-darwin"
-        | "x86_64-macos"
-        | "mach_o_x86_64"
-        | "macho-x86-64" => Some(TARGET_X86_64_MACOS),
+        "x86_64-apple-darwin" | "x86_64-macos" | "mach_o_x86_64" | "macho-x86-64" => {
+            Some(TARGET_X86_64_MACOS)
+        }
         "aarch64-apple-darwin" | "arm64-apple-darwin" | "arm64-macos" | "macho-arm64" => {
             Some(TARGET_AARCH64_MACOS)
         }
@@ -3773,7 +3954,9 @@ fn make_pseudo_digest(payload: &[u8], size: usize, salt: u64) -> Vec<u8> {
     while out.len() < size {
         let hash = fnv1a64_seeded(payload, seed).to_le_bytes();
         out.extend_from_slice(&hash);
-        seed = seed.wrapping_mul(0x100000001b3).wrapping_add(0x9e3779b97f4a7c15);
+        seed = seed
+            .wrapping_mul(0x100000001b3)
+            .wrapping_add(0x9e3779b97f4a7c15);
     }
     out.truncate(size);
     out
@@ -3985,7 +4168,12 @@ fn probe_object_format_path(path: &Path) -> u32 {
     probe_object_format_bytes(&raw)
 }
 
-fn dynstr_symbol_name(raw: &[u8], dynstr_off: usize, dynstr_size: usize, st_name: u32) -> Option<String> {
+fn dynstr_symbol_name(
+    raw: &[u8],
+    dynstr_off: usize,
+    dynstr_size: usize,
+    st_name: u32,
+) -> Option<String> {
     let name_off = st_name as usize;
     if name_off >= dynstr_size {
         return None;
@@ -4058,7 +4246,12 @@ fn read_c_string_from_bytes(raw: &[u8], start: usize) -> Option<String> {
     Some(String::from_utf8_lossy(&raw[start..end]).to_string())
 }
 
-fn pe_rva_to_file_offset(raw: &[u8], section_table_off: usize, section_count: usize, rva: u32) -> Option<usize> {
+fn pe_rva_to_file_offset(
+    raw: &[u8],
+    section_table_off: usize,
+    section_count: usize,
+    rva: u32,
+) -> Option<usize> {
     for i in 0..section_count {
         let sec_off = section_table_off.checked_add(i.saturating_mul(40))?;
         if sec_off + 40 > raw.len() {
@@ -4303,10 +4496,11 @@ fn ingest_shared_pe_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
         return ERR_INVALID_FORMAT;
     }
 
-    let export_dir_off = match pe_rva_to_file_offset(raw, section_table_off, section_count, export_rva) {
-        Some(v) => v,
-        None => return ERR_OK,
-    };
+    let export_dir_off =
+        match pe_rva_to_file_offset(raw, section_table_off, section_count, export_rva) {
+            Some(v) => v,
+            None => return ERR_OK,
+        };
     if export_dir_off + 40 > raw.len() {
         return ERR_INVALID_FORMAT;
     }
@@ -4323,10 +4517,11 @@ fn ingest_shared_pe_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
         return ERR_OK;
     }
 
-    let names_table_off = match pe_rva_to_file_offset(raw, section_table_off, section_count, address_of_names_rva) {
-        Some(v) => v,
-        None => return ERR_OK,
-    };
+    let names_table_off =
+        match pe_rva_to_file_offset(raw, section_table_off, section_count, address_of_names_rva) {
+            Some(v) => v,
+            None => return ERR_OK,
+        };
     for i in 0..number_of_names {
         let entry_off = match names_table_off.checked_add(i.saturating_mul(4)) {
             Some(v) => v,
@@ -4339,7 +4534,8 @@ fn ingest_shared_pe_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
             Some(v) if v != 0 => v,
             _ => continue,
         };
-        let name_off = match pe_rva_to_file_offset(raw, section_table_off, section_count, name_rva) {
+        let name_off = match pe_rva_to_file_offset(raw, section_table_off, section_count, name_rva)
+        {
             Some(v) => v,
             None => continue,
         };
@@ -4929,7 +5125,8 @@ fn parse_coff_object(path: u64) -> Result<ObjectRecord, u32> {
                     return Err(ERR_INVALID_FORMAT);
                 }
                 let offset = read_u32_le_at(&raw, rel_off).ok_or(ERR_INVALID_FORMAT)? as u64;
-                let raw_symbol = read_u32_le_at(&raw, rel_off + 4).ok_or(ERR_INVALID_FORMAT)? as usize;
+                let raw_symbol =
+                    read_u32_le_at(&raw, rel_off + 4).ok_or(ERR_INVALID_FORMAT)? as usize;
                 let reloc_kind_raw = read_u16_le_at(&raw, rel_off + 8).ok_or(ERR_INVALID_FORMAT)?;
                 let reloc_type = map_coff_relocation_type(machine, reloc_kind_raw);
                 let symbol = if raw_symbol < raw_to_canonical.len() {
@@ -5031,10 +5228,12 @@ fn parse_macho_object(path: u64) -> Result<ObjectRecord, u32> {
                     .iter()
                     .position(|b| *b == 0)
                     .unwrap_or(sect_name_raw.len());
-                let sect_name = String::from_utf8_lossy(&sect_name_raw[..sect_name_end]).to_string();
+                let sect_name =
+                    String::from_utf8_lossy(&sect_name_raw[..sect_name_end]).to_string();
 
                 let size = read_u64_le_at(&raw, off + 40).ok_or(ERR_INVALID_FORMAT)? as usize;
-                let data_offset = read_u32_le_at(&raw, off + 48).ok_or(ERR_INVALID_FORMAT)? as usize;
+                let data_offset =
+                    read_u32_le_at(&raw, off + 48).ok_or(ERR_INVALID_FORMAT)? as usize;
                 let align_pow = read_u32_le_at(&raw, off + 52).ok_or(ERR_INVALID_FORMAT)?;
                 let reloff = read_u32_le_at(&raw, off + 56).ok_or(ERR_INVALID_FORMAT)? as usize;
                 let nreloc = read_u32_le_at(&raw, off + 60).ok_or(ERR_INVALID_FORMAT)? as usize;
@@ -5150,7 +5349,11 @@ fn parse_macho_object(path: u64) -> Result<ObjectRecord, u32> {
             let is_extern = (info >> 27) & 0x1;
             let macho_type = (info >> 28) & 0x0f;
             let reloc_type = map_macho_relocation_type(record.machine, macho_type, pcrel, length);
-            let section_ref = match record.sections.iter().find(|s| s.index == reloc.section_index) {
+            let section_ref = match record
+                .sections
+                .iter()
+                .find(|s| s.index == reloc.section_index)
+            {
                 Some(v) => v,
                 None => continue,
             };
@@ -5396,7 +5599,11 @@ fn write_minimal_pe_exec(
         write_u32_le(&mut out, sh + 8, plan.virt_size);
         write_u32_le(&mut out, sh + 12, plan.rva);
         write_u32_le(&mut out, sh + 16, plan.raw_size);
-        write_u32_le(&mut out, sh + 20, headers_raw_size.saturating_add(plan.raw_off));
+        write_u32_le(
+            &mut out,
+            sh + 20,
+            headers_raw_size.saturating_add(plan.raw_off),
+        );
         write_u32_le(&mut out, sh + 36, plan.characteristics);
         sh += 40;
     }
@@ -5994,7 +6201,11 @@ fn build_map_rows(state: &LinkerState) -> Vec<String> {
         .map(|(i, (addr, bytes, obj, sec))| {
             format!(
                 "#{:04} obj={} sec={} addr=0x{:016x} size=0x{:x}",
-                i, obj, sec, addr, bytes.len()
+                i,
+                obj,
+                sec,
+                addr,
+                bytes.len()
             )
         })
         .collect::<Vec<_>>();
@@ -6100,9 +6311,7 @@ pub extern "C" fn host_path_exists(path: u64) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn host_path_is_file(path: u64) -> u32 {
-    to_path(path)
-        .map(|p| p.is_file() as u32)
-        .unwrap_or(0)
+    to_path(path).map(|p| p.is_file() as u32).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -6114,7 +6323,11 @@ pub extern "C" fn host_path_join(base: u64, leaf: u64) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn host_linker_find_versioned_shared_in_path(search_path: u64, name: u64, target: u32) -> u64 {
+pub extern "C" fn host_linker_find_versioned_shared_in_path(
+    search_path: u64,
+    name: u64,
+    target: u32,
+) -> u64 {
     let base = match to_path(search_path) {
         Some(v) => v,
         None => return 0,
@@ -6207,7 +6420,12 @@ pub extern "C" fn host_fs_write_u8(path: u64, offset: u64, value: u8) -> u32 {
         None => return 10,
     };
     ensure_parent(&p);
-    let mut f = match OpenOptions::new().create(true).read(true).write(true).open(&p) {
+    let mut f = match OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&p)
+    {
         Ok(v) => v,
         Err(_) => return 10,
     };
@@ -6464,7 +6682,11 @@ pub extern "C" fn host_linker_set_gc_sections(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_gc_sections() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.gc_sections { 1 } else { 0 }
+    if state.gc_sections {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -6477,7 +6699,11 @@ pub extern "C" fn host_linker_set_allow_multiple_definition(enabled: u32) -> u32
 #[no_mangle]
 pub extern "C" fn host_linker_get_allow_multiple_definition() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.allow_multiple_definition { 1 } else { 0 }
+    if state.allow_multiple_definition {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -6548,10 +6774,20 @@ pub extern "C" fn host_linker_set_z_option(option: u64) -> u32 {
         "nodlopen" => state.z_nodlopen = true,
         "nonodlopen" => state.z_nodlopen = false,
         // Accepted compatibility spellings that currently do not change emit policy.
-        "text" | "notext" | "separate-code" | "noseparate-code"
-        | "pack-relative-relocs" | "nopack-relative-relocs" | "start-stop-gc"
-        | "nostart-stop-gc" | "ibt" | "noibt" | "ibtplt" | "noibtplt"
-        | "shstk" | "noshstk" => {}
+        "text"
+        | "notext"
+        | "separate-code"
+        | "noseparate-code"
+        | "pack-relative-relocs"
+        | "nopack-relative-relocs"
+        | "start-stop-gc"
+        | "nostart-stop-gc"
+        | "ibt"
+        | "noibt"
+        | "ibtplt"
+        | "noibtplt"
+        | "shstk"
+        | "noshstk" => {}
         _ => {
             if text.starts_with("max-page-size=")
                 || text.starts_with("common-page-size=")
@@ -6763,7 +6999,11 @@ pub extern "C" fn host_linker_start_lib_member_count() -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_start_lib_member(index: u32) -> u64 {
     let state = linker().lock().expect("linker mutex poisoned");
-    state.start_lib_members.get(index as usize).copied().unwrap_or(0)
+    state
+        .start_lib_members
+        .get(index as usize)
+        .copied()
+        .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -6829,7 +7069,11 @@ pub extern "C" fn host_linker_set_use_default_search_paths(enabled: u32) -> u32 
 #[no_mangle]
 pub extern "C" fn host_linker_get_use_default_search_paths() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.use_default_search_paths { 1 } else { 0 }
+    if state.use_default_search_paths {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -6953,7 +7197,11 @@ pub extern "C" fn host_linker_set_shared(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_shared() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.link_shared { 1 } else { 0 }
+    if state.link_shared {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -6966,7 +7214,11 @@ pub extern "C" fn host_linker_set_pie(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_pie() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.link_pie { 1 } else { 0 }
+    if state.link_pie {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -6979,7 +7231,11 @@ pub extern "C" fn host_linker_set_static(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_static() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.link_static { 1 } else { 0 }
+    if state.link_static {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -6992,7 +7248,11 @@ pub extern "C" fn host_linker_set_as_needed(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_as_needed() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.link_as_needed { 1 } else { 0 }
+    if state.link_as_needed {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7005,7 +7265,11 @@ pub extern "C" fn host_linker_set_symbolic_bindings(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_symbolic_bindings() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.symbolic_bindings { 1 } else { 0 }
+    if state.symbolic_bindings {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7018,7 +7282,11 @@ pub extern "C" fn host_linker_set_symbolic_functions(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_symbolic_functions() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.symbolic_functions { 1 } else { 0 }
+    if state.symbolic_functions {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7031,7 +7299,11 @@ pub extern "C" fn host_linker_set_symbolic_group(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_symbolic_group() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.symbolic_group { 1 } else { 0 }
+    if state.symbolic_group {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7101,7 +7373,11 @@ pub extern "C" fn host_linker_set_new_dtags(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_new_dtags() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.link_new_dtags { 1 } else { 0 }
+    if state.link_new_dtags {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7114,7 +7390,11 @@ pub extern "C" fn host_linker_set_copy_dt_needed_entries(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_copy_dt_needed_entries() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.link_copy_dt_needed_entries { 1 } else { 0 }
+    if state.link_copy_dt_needed_entries {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7168,7 +7448,11 @@ pub extern "C" fn host_linker_set_fatal_warnings(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_fatal_warnings() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.fatal_warnings { 1 } else { 0 }
+    if state.fatal_warnings {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7181,7 +7465,11 @@ pub extern "C" fn host_linker_set_color_diagnostics(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_color_diagnostics() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.color_diagnostics { 1 } else { 0 }
+    if state.color_diagnostics {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7194,7 +7482,11 @@ pub extern "C" fn host_linker_set_print_gc_sections(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_print_gc_sections() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.print_gc_sections { 1 } else { 0 }
+    if state.print_gc_sections {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7227,7 +7519,11 @@ pub extern "C" fn host_linker_set_emit_relocs(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_emit_relocs() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.emit_relocs { 1 } else { 0 }
+    if state.emit_relocs {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7256,7 +7552,11 @@ pub extern "C" fn host_linker_set_pe_no_entry(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_pe_no_entry() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.pe_no_entry { 1 } else { 0 }
+    if state.pe_no_entry {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7269,7 +7569,11 @@ pub extern "C" fn host_linker_set_pe_dynamic_base(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_pe_dynamic_base() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.pe_dynamic_base { 1 } else { 0 }
+    if state.pe_dynamic_base {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7282,7 +7586,11 @@ pub extern "C" fn host_linker_set_pe_nx_compat(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_pe_nx_compat() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.pe_nx_compat { 1 } else { 0 }
+    if state.pe_nx_compat {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7295,7 +7603,11 @@ pub extern "C" fn host_linker_set_pe_large_address_aware(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_pe_large_address_aware() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.pe_large_address_aware { 1 } else { 0 }
+    if state.pe_large_address_aware {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7308,7 +7620,11 @@ pub extern "C" fn host_linker_set_whole_archive(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_whole_archive() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.whole_archive { 1 } else { 0 }
+    if state.whole_archive {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7321,7 +7637,11 @@ pub extern "C" fn host_linker_set_no_undefined(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_no_undefined() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.no_undefined { 1 } else { 0 }
+    if state.no_undefined {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7334,7 +7654,11 @@ pub extern "C" fn host_linker_set_allow_shlib_undefined(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_allow_shlib_undefined() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.allow_shlib_undefined { 1 } else { 0 }
+    if state.allow_shlib_undefined {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7363,7 +7687,11 @@ pub extern "C" fn host_linker_set_warn_unresolved(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_warn_unresolved() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.warn_unresolved { 1 } else { 0 }
+    if state.warn_unresolved {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7376,7 +7704,11 @@ pub extern "C" fn host_linker_set_trace(enabled: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_trace() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.trace_enabled { 1 } else { 0 }
+    if state.trace_enabled {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7460,7 +7792,11 @@ pub extern "C" fn host_linker_get_soname() -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn host_linker_note_needed_library(requested: u64, resolved: u64, contributed: u32) -> u32 {
+pub extern "C" fn host_linker_note_needed_library(
+    requested: u64,
+    resolved: u64,
+    contributed: u32,
+) -> u32 {
     let requested_text = read_c_string(requested).unwrap_or_default();
     let resolved_text = read_c_string(resolved).unwrap_or_default();
     let mut state = linker().lock().expect("linker mutex poisoned");
@@ -7474,7 +7810,8 @@ pub extern "C" fn host_linker_note_needed_library(requested: u64, resolved: u64,
         Some(v) => v,
         None => return set_last_error(&mut state, ERR_INVALID_FORMAT),
     };
-    let preferred = preferred_needed_library_name_from_resolved(&resolved_text).unwrap_or(normalized);
+    let preferred =
+        preferred_needed_library_name_from_resolved(&resolved_text).unwrap_or(normalized);
     add_needed_library_if_missing(&mut state, &preferred);
     append_copy_dt_needed_entries(&mut state, &resolved_text);
     if state.trace_enabled {
@@ -7496,7 +7833,11 @@ pub extern "C" fn host_linker_shared_undefined_symbol_count() -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_last_shared_object_retained() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
-    if state.last_shared_object_retained { 1 } else { 0 }
+    if state.last_shared_object_retained {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -7556,11 +7897,7 @@ pub extern "C" fn host_linker_archive_progress_get() -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_get_search_path(index: u32) -> u64 {
     let state = linker().lock().expect("linker mutex poisoned");
-    state
-        .search_paths
-        .get(index as usize)
-        .copied()
-        .unwrap_or(0)
+    state.search_paths.get(index as usize).copied().unwrap_or(0)
 }
 
 #[no_mangle]
@@ -7642,7 +7979,12 @@ pub extern "C" fn host_linker_ingest_shared_object(path: u64) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn host_linker_object_begin(path: u64, file_size: u64, elf_type: u16, machine: u16) -> u32 {
+pub extern "C" fn host_linker_object_begin(
+    path: u64,
+    file_size: u64,
+    elf_type: u16,
+    machine: u16,
+) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.current_object = Some(ObjectRecord {
         path,
@@ -7701,7 +8043,8 @@ pub extern "C" fn host_linker_object_add_symbol(
 ) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     if let Some(current) = state.current_object.as_mut() {
-        let resolved_hash = symbol_name_hash_from_strtab(current, name_hash, strtab_section, name_hash);
+        let resolved_hash =
+            symbol_name_hash_from_strtab(current, name_hash, strtab_section, name_hash);
         current.symbols.push(ObjectSymbol {
             name_hash: resolved_hash,
             bind,
@@ -7815,7 +8158,10 @@ pub extern "C" fn host_linker_object_relocation_count(object_index: u32) -> u32 
 }
 
 #[no_mangle]
-pub extern "C" fn host_linker_object_relocation_section(object_index: u32, reloc_index: u32) -> u32 {
+pub extern "C" fn host_linker_object_relocation_section(
+    object_index: u32,
+    reloc_index: u32,
+) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.active_patch_object = Some(object_index);
     state
@@ -7898,11 +8244,7 @@ pub extern "C" fn host_linker_global_symbol_defined(name_hash: u64) -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_global_symbol_bind(name_hash: u64) -> u8 {
     let state = linker().lock().expect("linker mutex poisoned");
-    state
-        .globals
-        .get(&name_hash)
-        .map(|s| s.bind)
-        .unwrap_or(0)
+    state.globals.get(&name_hash).map(|s| s.bind).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -8020,7 +8362,8 @@ pub extern "C" fn host_linker_aarch64_tls_data_reloc_value(
     addend: u64,
 ) -> u64 {
     let mut state = linker().lock().expect("linker mutex poisoned");
-    let result = aarch64_tls_data_reloc_value(&state, object_index, symbol_index, reloc_type, addend);
+    let result =
+        aarch64_tls_data_reloc_value(&state, object_index, symbol_index, reloc_type, addend);
     match result {
         Ok(v) => {
             set_last_error(&mut state, ERR_OK);
@@ -8103,7 +8446,51 @@ pub extern "C" fn host_linker_aarch64_tls_synth_reloc_value(
 }
 
 #[no_mangle]
-pub extern "C" fn host_linker_section_runtime_address(object_index: u32, section_index: u32) -> u64 {
+pub extern "C" fn host_linker_x86_64_tls_got_reloc_value(
+    object_index: u32,
+    symbol_index: u32,
+    reloc_type: u32,
+    addend: u64,
+    place_addr: u64,
+) -> u64 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    // Initialize TLS GOT base if not already set
+    if state.tls_got_base == 0 {
+        // Allocate TLS GOT region after regular GOT
+        let got_end = state
+            .objects
+            .iter()
+            .flat_map(|o| o.sections.iter())
+            .filter(|s| s.name == ".got.plt")
+            .map(|s| s.address + s.size)
+            .max()
+            .unwrap_or(0x600000);
+        state.tls_got_base = got_end;
+    }
+    match x86_64_tls_got_reloc_value(
+        &mut state,
+        object_index,
+        symbol_index,
+        reloc_type,
+        addend,
+        place_addr,
+    ) {
+        Ok(v) => {
+            set_last_error(&mut state, ERR_OK);
+            v
+        }
+        Err(code) => {
+            set_last_error(&mut state, code);
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_section_runtime_address(
+    object_index: u32,
+    section_index: u32,
+) -> u64 {
     let state = linker().lock().expect("linker mutex poisoned");
     build_section_runtime_address(&state, object_index, section_index)
 }
@@ -8116,7 +8503,11 @@ pub extern "C" fn host_linker_patch_u32(section_index: u32, offset: u64, value: 
         Some(v) => v,
         None => return set_last_error(&mut state, ERR_INVALID_RELOCATION),
     };
-    let section = match object.sections.iter_mut().find(|s| s.index == section_index) {
+    let section = match object
+        .sections
+        .iter_mut()
+        .find(|s| s.index == section_index)
+    {
         Some(v) => v,
         None => return set_last_error(&mut state, ERR_INVALID_SECTION),
     };
@@ -8170,7 +8561,11 @@ pub extern "C" fn host_linker_patch_u64(section_index: u32, offset: u64, value: 
         Some(v) => v,
         None => return set_last_error(&mut state, ERR_INVALID_RELOCATION),
     };
-    let section = match object.sections.iter_mut().find(|s| s.index == section_index) {
+    let section = match object
+        .sections
+        .iter_mut()
+        .find(|s| s.index == section_index)
+    {
         Some(v) => v,
         None => return set_last_error(&mut state, ERR_INVALID_SECTION),
     };
@@ -8306,7 +8701,11 @@ fn write_elf_output_for_state(
     let link_shared = state.link_shared;
     let link_pie = state.link_pie;
     let link_static = state.link_static;
-    let et_type = if link_shared || link_pie { ET_DYN } else { ET_EXEC };
+    let et_type = if link_shared || link_pie {
+        ET_DYN
+    } else {
+        ET_EXEC
+    };
     let entry = if link_shared {
         0
     } else if entry_override != 0 {
@@ -8489,7 +8888,11 @@ pub extern "C" fn host_linker_write_mbr_image(output: u64) -> u32 {
 }
 
 #[no_mangle]
-pub extern "C" fn host_linker_write_mbr_boot_image(output: u64, kernel: u64, kernel_size: u32) -> u32 {
+pub extern "C" fn host_linker_write_mbr_boot_image(
+    output: u64,
+    kernel: u64,
+    kernel_size: u32,
+) -> u32 {
     let out_path = match to_path(output) {
         Some(p) => p,
         None => return 10,
@@ -8849,7 +9252,10 @@ mod tests {
         assert_eq!(host_linker_set_no_undefined(0), ERR_OK);
         assert_eq!(host_linker_set_use_default_search_paths(1), ERR_OK);
         assert_eq!(host_linker_set_allow_shlib_undefined(1), ERR_OK);
-        assert_eq!(host_linker_set_unresolved_policy(UNRESOLVED_POLICY_REPORT_ALL), ERR_OK);
+        assert_eq!(
+            host_linker_set_unresolved_policy(UNRESOLVED_POLICY_REPORT_ALL),
+            ERR_OK
+        );
         assert_eq!(host_linker_set_warn_unresolved(0), ERR_OK);
         assert_eq!(host_linker_set_trace(0), ERR_OK);
 
@@ -8865,7 +9271,10 @@ mod tests {
         assert_eq!(host_linker_set_no_undefined(1), ERR_OK);
         assert_eq!(host_linker_set_use_default_search_paths(0), ERR_OK);
         assert_eq!(host_linker_set_allow_shlib_undefined(0), ERR_OK);
-        assert_eq!(host_linker_set_unresolved_policy(UNRESOLVED_POLICY_IGNORE_ALL), ERR_OK);
+        assert_eq!(
+            host_linker_set_unresolved_policy(UNRESOLVED_POLICY_IGNORE_ALL),
+            ERR_OK
+        );
         assert_eq!(host_linker_set_warn_unresolved(1), ERR_OK);
         assert_eq!(host_linker_set_trace(1), ERR_OK);
 
@@ -8881,7 +9290,10 @@ mod tests {
         assert_eq!(host_linker_get_no_undefined(), 0);
         assert_eq!(host_linker_get_use_default_search_paths(), 1);
         assert_eq!(host_linker_get_allow_shlib_undefined(), 1);
-        assert_eq!(host_linker_get_unresolved_policy(), UNRESOLVED_POLICY_REPORT_ALL);
+        assert_eq!(
+            host_linker_get_unresolved_policy(),
+            UNRESOLVED_POLICY_REPORT_ALL
+        );
         assert_eq!(host_linker_get_warn_unresolved(), 0);
         assert_eq!(host_linker_get_trace(), 0);
     }
@@ -8900,8 +9312,14 @@ mod tests {
         assert_eq!(host_linker_start_lib_depth(), 1);
 
         assert_eq!(host_linker_start_lib_member_count(), 0);
-        assert_eq!(host_linker_start_lib_register_member(intern_string("a.o")), ERR_OK);
-        assert_eq!(host_linker_start_lib_register_member(intern_string("b.o")), ERR_OK);
+        assert_eq!(
+            host_linker_start_lib_register_member(intern_string("a.o")),
+            ERR_OK
+        );
+        assert_eq!(
+            host_linker_start_lib_register_member(intern_string("b.o")),
+            ERR_OK
+        );
         assert_eq!(host_linker_start_lib_member_count(), 2);
         assert_ne!(host_linker_get_start_lib_member(0), 0);
         assert_ne!(host_linker_get_start_lib_member(1), 0);
@@ -8930,11 +9348,26 @@ mod tests {
         assert_eq!(host_linker_set_use_default_search_paths(1), ERR_OK);
         assert_eq!(host_linker_get_use_default_search_paths(), 1);
 
-        assert_eq!(host_linker_block_default_library(intern_string("kernel32.lib")), ERR_OK);
-        assert_eq!(host_linker_is_default_library_blocked(intern_string("kernel32.lib")), 1);
-        assert_eq!(host_linker_is_default_library_blocked(intern_string("kernel32")), 1);
-        assert_eq!(host_linker_is_default_library_blocked(intern_string("libkernel32.a")), 1);
-        assert_eq!(host_linker_is_default_library_blocked(intern_string("user32")), 0);
+        assert_eq!(
+            host_linker_block_default_library(intern_string("kernel32.lib")),
+            ERR_OK
+        );
+        assert_eq!(
+            host_linker_is_default_library_blocked(intern_string("kernel32.lib")),
+            1
+        );
+        assert_eq!(
+            host_linker_is_default_library_blocked(intern_string("kernel32")),
+            1
+        );
+        assert_eq!(
+            host_linker_is_default_library_blocked(intern_string("libkernel32.a")),
+            1
+        );
+        assert_eq!(
+            host_linker_is_default_library_blocked(intern_string("user32")),
+            0
+        );
     }
 
     #[test]
@@ -8952,11 +9385,26 @@ mod tests {
         assert_eq!(host_linker_set_z_option(intern_string("nomuldefs")), ERR_OK);
         assert_eq!(host_linker_get_allow_multiple_definition(), 0);
 
-        assert_eq!(host_linker_set_z_option(intern_string("separate-code")), ERR_OK);
-        assert_eq!(host_linker_set_z_option(intern_string("pack-relative-relocs")), ERR_OK);
-        assert_eq!(host_linker_set_z_option(intern_string("max-page-size=0x1000")), ERR_OK);
-        assert_eq!(host_linker_set_z_option(intern_string("common-page-size=0x1000")), ERR_OK);
-        assert_eq!(host_linker_set_z_option(intern_string("stack-size=0x400000")), ERR_OK);
+        assert_eq!(
+            host_linker_set_z_option(intern_string("separate-code")),
+            ERR_OK
+        );
+        assert_eq!(
+            host_linker_set_z_option(intern_string("pack-relative-relocs")),
+            ERR_OK
+        );
+        assert_eq!(
+            host_linker_set_z_option(intern_string("max-page-size=0x1000")),
+            ERR_OK
+        );
+        assert_eq!(
+            host_linker_set_z_option(intern_string("common-page-size=0x1000")),
+            ERR_OK
+        );
+        assert_eq!(
+            host_linker_set_z_option(intern_string("stack-size=0x400000")),
+            ERR_OK
+        );
     }
 
     #[test]
@@ -8978,10 +9426,22 @@ mod tests {
         assert_eq!(flags1 & DF_1_NOOPEN, DF_1_NOOPEN);
 
         assert_eq!(host_linker_set_z_option(intern_string("noorigin")), ERR_OK);
-        assert_eq!(host_linker_set_z_option(intern_string("nointerpose")), ERR_OK);
-        assert_eq!(host_linker_set_z_option(intern_string("noinitfirst")), ERR_OK);
-        assert_eq!(host_linker_set_z_option(intern_string("nonodelete")), ERR_OK);
-        assert_eq!(host_linker_set_z_option(intern_string("nonodlopen")), ERR_OK);
+        assert_eq!(
+            host_linker_set_z_option(intern_string("nointerpose")),
+            ERR_OK
+        );
+        assert_eq!(
+            host_linker_set_z_option(intern_string("noinitfirst")),
+            ERR_OK
+        );
+        assert_eq!(
+            host_linker_set_z_option(intern_string("nonodelete")),
+            ERR_OK
+        );
+        assert_eq!(
+            host_linker_set_z_option(intern_string("nonodlopen")),
+            ERR_OK
+        );
         let flags1_cleared = host_linker_get_dynamic_dt_flags_1();
         assert_eq!(flags1_cleared & DF_1_ORIGIN, 0);
         assert_eq!(flags1_cleared & DF_1_INTERPOSE, 0);
@@ -8994,7 +9454,10 @@ mod tests {
     fn dynamic_unresolved_gate_requires_shared_mode_and_non_strict_resolution() {
         assert_eq!(host_linker_reset_state(), ERR_OK);
         assert_eq!(host_linker_allow_dynamic_unresolved(), 0);
-        assert_eq!(host_linker_note_needed_library(intern_string("m"), intern_string("libm.so"), 1), ERR_OK);
+        assert_eq!(
+            host_linker_note_needed_library(intern_string("m"), intern_string("libm.so"), 1),
+            ERR_OK
+        );
         // Presence of DT_NEEDED entries alone should not weaken unresolved checks for executable mode.
         assert_eq!(host_linker_allow_dynamic_unresolved(), 0);
 

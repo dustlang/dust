@@ -1,5 +1,15 @@
-// Dust Intermediate Representation (DIR)
-// Canonical semantic form of DPL programs
+// File: lib.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Dust Intermediate Representation (DIR).
+//   Canonical semantic form of DPL programs after parsing and semantic analysis.
+//   This module defines:
+//     - DirProgram: Top-level program structure
+//     - DirForge: Forge (class/structure) definitions
+//     - DirProc: Procedure/function definitions
+//     - DirStmt: Statement types (assignments, control flow, effects)
+//     - DirExpr: Expression types with type information
+//     - DirTypeKind: Type definition kinds (structs, enums, primitives)
 
 use serde::{Deserialize, Serialize};
 

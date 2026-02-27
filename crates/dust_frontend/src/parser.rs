@@ -1,6 +1,13 @@
-// crates/dust_frontend/src/parser.rs
-//
-// DPL v0.1 parser (structure + expressions) following spec/03-grammar.md.
+// File: parser.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   DPL v0.1 parser (structure + expressions) following spec/03-grammar.md.
+//   This module implements:
+//     - Recursive descent parsing
+//     - AST construction from tokens
+//     - Expression parsing (arithmetic, logical, comparison)
+//     - Statement parsing (variable declarations, control flow)
+//     - Error reporting with source span information
 
 use crate::ast::*;
 use crate::lexer::{Keyword, Token};
@@ -823,7 +830,9 @@ impl Parser {
                 Ok(Spanned::new(Expr::Literal(Literal::Bool(*b)), sp))
             }
             Token::Ident(_) => self.parse_ident_path_expr(),
-            Token::Keyword(k) if keyword_expr_ident_text(k).is_some() => self.parse_ident_path_expr(),
+            Token::Keyword(k) if keyword_expr_ident_text(k).is_some() => {
+                self.parse_ident_path_expr()
+            }
             Token::LParen => {
                 self.bump();
                 let expr = self.parse_expr()?;
@@ -1109,4 +1118,3 @@ fn token_path_segment(token: &Token) -> Option<String> {
         _ => None,
     }
 }
-

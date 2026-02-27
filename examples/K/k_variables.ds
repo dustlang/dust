@@ -1,8 +1,14 @@
-// examples/K/k_variables.ds
+// File: k_variables.ds - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Demonstrates K Regime v0.2 variable declarations and types including:
+//   - Immutable variable bindings (let)
+//   - Mutable variable bindings (mut let)
+//   - Boolean variables
+//   - String variables
+//   - Integer arithmetic
 //
-// Demonstrates K Regime v0.2 variable declarations and types
-//
-// Regime: K (Classical / Deterministic)
+//   Regime: K (Classical / Deterministic)
 
 K main {
     // Immutable variable binding

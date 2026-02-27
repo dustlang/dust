@@ -1,11 +1,13 @@
-// examples/K/k_comment_handling.ds
+// File: k_comment_handling.ds - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Verifies lexer correctness for both line and block comments.
+//   Ensures comments are treated as whitespace and do not affect semantics.
 //
-// Purpose:
-// - Verifies lexer correctness for both line and block comments
-// - Ensures comments are treated as whitespace and do not affect semantics
+//   Expected behavior when executed:
+//     Comments OK
 //
-// Expected behavior when executed:
-//   Comments OK
+//   Regime: K (Classical / Deterministic)
 
 K main {
     // Line comment: next emit must still execute

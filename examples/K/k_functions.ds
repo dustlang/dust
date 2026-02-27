@@ -1,8 +1,14 @@
-// examples/K/k_functions.ds
+// File: k_functions.ds - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Demonstrates K Regime v0.2 function definitions including:
+//   - Function with parameters and return type
+//   - Function with multiple parameters
+//   - Procedure (returns unit)
+//   - Function with local variables
+//   - Recursive functions
 //
-// Demonstrates K Regime v0.2 function definitions
-//
-// Regime: K (Classical / Deterministic)
+//   Regime: K (Classical / Deterministic)
 
 // Function with parameters and return type
 K factorial(K[Int] n) -> K[Int] {

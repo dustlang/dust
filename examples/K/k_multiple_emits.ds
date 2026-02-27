@@ -1,15 +1,17 @@
-// examples/K/k_multiple_emits.ds
+// File: k_multiple_emits.ds - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Verifies ordered, irreversible effects in K-regime.
+//   Confirms that emit effects occur strictly in source order.
 //
-// Purpose:
-// - Verifies ordered, irreversible effects in K-regime
-// - Confirms that emit effects occur strictly in source order
+//   Expected behavior when executed:
+//     First line
+//     Second line
+//     Third line
 //
-// Expected behavior when executed:
-//   First line
-//   Second line
-//   Third line
+//   Any reordering or omission is a compiler/runtime bug.
 //
-// Any reordering or omission is a compiler/runtime bug.
+//   Regime: K (Classical / Deterministic)
 
 K main {
     emit "First line";

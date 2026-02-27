@@ -1,9 +1,12 @@
-// dust_semantics/src/type_system.rs
-//
-// DPL v0.2 Type System
-//
-// This module provides type inference, type checking, and symbol management
-// for the Dust Programming Language.
+// File: type_system.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   DPL v0.2 Type System implementation.
+//   This module provides:
+//     - Type inference and type checking
+//     - Symbol management (variable bindings, function signatures)
+//     - Type representations for primitives, composites, and special types
+//     - Type coercion and conversion rules
 
 use crate::ast::*;
 use std::collections::HashMap;

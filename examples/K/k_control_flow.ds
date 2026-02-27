@@ -1,8 +1,13 @@
-// examples/K/k_control_flow.ds
+// File: k_control_flow.ds - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Demonstrates K Regime v0.2 control flow structures including:
+//   - If-else statements
+//   - For loops (range-based)
+//   - While loops
+//   - Match expressions
 //
-// Demonstrates K Regime v0.2 control flow structures
-//
-// Regime: K (Classical / Deterministic)
+//   Regime: K (Classical / Deterministic)
 
 K main {
     // If-else statement

@@ -1,4 +1,13 @@
-// Semantic analysis: regimes, types, effects, constraints, contracts
+// File: lib.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Semantic analysis for the Dust Programming Language.
+//   This module handles:
+//     - Regime validation (K, Q, Φ)
+//     - Type checking and inference
+//     - Effect tracking (emit, memory operations)
+//     - Constraint solving
+//     - Contract verification
 
 use dust_dir::*;
 use dust_frontend::ast::*;

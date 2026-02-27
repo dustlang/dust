@@ -1,17 +1,19 @@
-// examples/K/k_empty_main.ds
+// File: k_empty_main.ds - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Verifies that an empty K-regime entrypoint is valid.
+//   Confirms the compiler emits a native executable that:
+//     - links successfully
+//     - runs successfully
+//     - returns exit code 0
 //
-// Purpose:
-// - Verifies that an empty K-regime entrypoint is valid
-// - Confirms the compiler emits a native executable that:
-//     * links successfully
-//     * runs successfully
-//     * returns exit code 0
+//   There are intentionally NO effects in this program.
 //
-// There are intentionally NO effects in this program.
+//   Expected behavior when executed:
+//     - No output
+//     - Process exits with status code 0
 //
-// Expected behavior when executed:
-//   - No output
-//   - Process exits with status code 0
+//   Regime: K (Classical / Deterministic)
 
 K main {
 }

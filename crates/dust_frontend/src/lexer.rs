@@ -1,16 +1,18 @@
-// crates/dust_frontend/src/lexer.rs
+// File: lexer.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Minimal DPL lexer (v0.1) — tokenizes source code into tokens.
+//   Features:
+//     - Produces Spanned<Token> with byte spans
+//     - Supports: identifiers, keywords, integers, strings, booleans
+//     - Symbols: ::, ->, ==, <=, >=, &&, ||, + - * / < > = : ; , . { } ( ) [ ]
+//     - Skips whitespace and comments:
+//         // line comments
+//         /* block comments */ (non-nesting)
 //
-// Minimal DPL lexer (v0.1) — tokens only.
-// - Produces Spanned<Token> with byte spans.
-// - Supports: identifiers, keywords, integers, strings, booleans
-// - Symbols: ::, ->, ==, <=, >=, &&, ||, + - * / < > = : ; , . { } ( ) [ ]
-// - Skips whitespace and comments:
-//     // line comments
-//     /* block comments */ (non-nesting)
-//
-// NOTE: This lexer is deliberately conservative and ASCII-oriented for operators/keywords.
-// Identifiers support ASCII letters/underscore + digits after first char. The Φ regime
-// is tokenized as a keyword if the exact character 'Φ' appears.
+//   NOTE: This lexer is deliberately conservative and ASCII-oriented for operators/keywords.
+//   Identifiers support ASCII letters/underscore + digits after first char. The Φ regime
+//   is tokenized as a keyword if the exact character 'Φ' appears.
 
 use crate::ast::{Span, Spanned};
 

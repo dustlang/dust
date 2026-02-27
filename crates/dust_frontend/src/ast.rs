@@ -1,9 +1,13 @@
-// crates/dust_frontend/src/ast.rs
-//
-// DPL v0.1 — Abstract Syntax Tree
-//
-// This AST is the shared contract between the frontend (lexer/parser) and the
-// semantic/lowering passes.
+// File: ast.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   DPL v0.1 — Abstract Syntax Tree definitions.
+//   This AST is the shared contract between the frontend (lexer/parser) and the
+//   semantic/lowering passes. Contains:
+//     - Source span tracking
+//     - AST node definitions (programs, statements, expressions)
+//     - Token definitions
+//     - Visitor traits for AST traversal
 
 use std::fmt;
 

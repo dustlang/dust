@@ -1,9 +1,14 @@
-// dust_codegen/src/v02_codegen.rs
-//
-// DPL v0.2 Code Generation
-//
-// This module provides code generation for the expanded K Regime features
-// including variables, control flow, functions, and memory operations.
+// File: v02_codegen.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   DPL v0.2 Code Generation.
+//   This module provides code generation for the expanded K Regime features
+//   including:
+//     - Variables (mutable and immutable)
+//     - Control flow (if/else, loops, match)
+//     - Functions (parameters, return values, recursion)
+//     - Memory operations (allocation, deallocation)
+//     - Type system integration
 
 use cranelift_codegen::ir::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};

@@ -1,4 +1,14 @@
-// crates/dust_driver/src/main.rs
+// File: main.rs - This file is part of the DPL Toolchain
+// Copyright (c) 2026 Dust LLC, and Contributors
+// Description:
+//   Dust Programming Language compiler driver (dust).
+//   This is the main entry point for the compiler providing commands:
+//     - dust build <file.ds> - Compile to native executable
+//     - dust run <file.ds> - Build and run
+//     - dust check <file.ds> - Type check without building
+//     - dust fmt <file.ds> - Format source file
+//
+//   The driver orchestrates: lexer, parser, semantic analysis, codegen, and linking
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -322,13 +332,7 @@ fn cmd_obj(
         }
 
         let result_path = emit_obj_for_source(
-            &dir,
-            &file,
-            &out_path,
-            entry,
-            target,
-            bare_metal,
-            auto_entry,
+            &dir, &file, &out_path, entry, target, bare_metal, auto_entry,
         )?;
         println!("{}", result_path.display());
     }
