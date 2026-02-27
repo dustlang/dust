@@ -7921,4 +7921,62 @@ mod tests {
         assert!(saw_tlsgd_dtprel);
         assert!(saw_named_symbol);
     }
+
+    #[test]
+    fn aarch64_tls_le_rewrite_word_fixture_bytes_present_in_elf_payload() {
+        let mut state = LinkerState::default();
+        reset_linker_state_defaults(&mut state);
+        state.target = TARGET_AARCH64_LINUX;
+        state.output_format = FORMAT_ELF64;
+        state.image_base = 0x0060_0000;
+        state.entry = 0x0060_1000;
+
+        let rewritten_words: [u32; 4] = [
+            0xD53BD040, // mrs x0, tpidr_el0
+            0xD28ACF01, // movz x1, #0x5678
+            0xF2A24681, // movk x1, #0x1234, lsl #16
+            0x8B010000, // add x0, x0, x1
+        ];
+        let mut section_bytes = Vec::new();
+        for word in rewritten_words {
+            section_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+
+        let object = ObjectRecord {
+            path: 0,
+            file_size: section_bytes.len() as u64,
+            elf_type: ET_EXEC,
+            machine: EM_AARCH64,
+            sections: vec![ObjectSection {
+                index: 1,
+                section_type: SHT_PROGBITS,
+                flags: SHF_ALLOC | SHF_EXECINSTR,
+                offset: 0,
+                size: section_bytes.len() as u64,
+                link: 0,
+                info: 0,
+                align: 16,
+                entsize: 0,
+                data: section_bytes.clone(),
+            }],
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+        };
+        state.objects.push(object);
+
+        let temp = std::env::temp_dir().join("dustlink_tls_le_rewrite_words_fixture_aarch64.elf");
+        let _ = fs::remove_file(&temp);
+        let rc = write_elf_output_for_state(&temp, &state, state.entry, state.image_base);
+        assert_eq!(rc, ERR_OK);
+        let raw = fs::read(&temp).expect("read tls le rewrite fixture");
+        let _ = fs::remove_file(&temp);
+
+        let tags = dynamic_tag_map(&raw);
+        let load_off = *tags.get(&0xffff_ffff_ffff_ff01).unwrap_or(&0) as usize;
+        assert!(load_off > 0);
+        assert!(load_off + section_bytes.len() <= raw.len());
+
+        let emitted = &raw[load_off..load_off + section_bytes.len()];
+        assert_eq!(emitted, section_bytes.as_slice());
+    }
 }
