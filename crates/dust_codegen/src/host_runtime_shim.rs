@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
@@ -61,8 +62,17 @@ const DT_SONAME: u64 = 14;
 const DT_RPATH: u64 = 15;
 const DT_RUNPATH: u64 = 29;
 const DT_FLAGS: u64 = 30;
+const DT_FLAGS_1: u64 = 0x6fff_fffb;
 const DT_GNU_HASH: u64 = 0x6fff_fef5;
 const DF_BIND_NOW: u64 = 0x8;
+const DF_SYMBOLIC: u64 = 0x2;
+const DF_1_NOW: u64 = 0x0000_0001;
+const DF_1_GROUP: u64 = 0x0000_0004;
+const DF_1_NODELETE: u64 = 0x0000_0008;
+const DF_1_INITFIRST: u64 = 0x0000_0020;
+const DF_1_NOOPEN: u64 = 0x0000_0040;
+const DF_1_ORIGIN: u64 = 0x0000_0080;
+const DF_1_INTERPOSE: u64 = 0x0000_0400;
 
 const FORMAT_ELF64: u32 = 1;
 const FORMAT_BINARY: u32 = 2;
@@ -240,6 +250,15 @@ struct Elf64RelaRecord {
 struct LinkerOptionState {
     link_static: bool,
     link_as_needed: bool,
+    symbolic_bindings: bool,
+    symbolic_functions: bool,
+    symbolic_group: bool,
+    z_origin: bool,
+    z_interpose: bool,
+    z_initfirst: bool,
+    z_nodelete: bool,
+    z_nodlopen: bool,
+    use_default_search_paths: bool,
     whole_archive: bool,
     link_new_dtags: bool,
     link_copy_dt_needed_entries: bool,
@@ -278,6 +297,11 @@ struct LinkerState {
     z_relro: bool,
     z_now: bool,
     z_execstack: bool,
+    z_origin: bool,
+    z_interpose: bool,
+    z_initfirst: bool,
+    z_nodelete: bool,
+    z_nodlopen: bool,
     memory_origin: u64,
     memory_length: u64,
     pending_elf_entry: u64,
@@ -286,11 +310,18 @@ struct LinkerState {
     loaded_archive_members: HashSet<String>,
     archive_progress: u32,
     group_archive_starts: Vec<u32>,
+    start_lib_members: Vec<u64>,
+    loaded_start_lib_members: HashSet<u32>,
+    group_start_lib_starts: Vec<u32>,
+    start_lib_progress: u32,
     option_state_stack: Vec<LinkerOptionState>,
     link_shared: bool,
     link_pie: bool,
     link_static: bool,
     link_as_needed: bool,
+    symbolic_bindings: bool,
+    symbolic_functions: bool,
+    symbolic_group: bool,
     whole_archive: bool,
     link_new_dtags: bool,
     link_copy_dt_needed_entries: bool,
@@ -307,6 +338,9 @@ struct LinkerState {
     dynamic_linker_path: u64,
     soname: u64,
     needed_shared_libs: Vec<u64>,
+    last_shared_object_retained: bool,
+    use_default_search_paths: bool,
+    blocked_default_library_hashes: HashSet<u64>,
     hash_style: u32,
     thread_count: u32,
     emit_eh_frame_hdr: bool,
@@ -408,6 +442,123 @@ fn target_is_macos(target: u32) -> bool {
 
 fn target_is_linux(target: u32) -> bool {
     target == TARGET_X86_64_LINUX || target == TARGET_AARCH64_LINUX || target == TARGET_NONE
+}
+
+fn parse_version_components(text: &str) -> Vec<(bool, u64, String)> {
+    let mut out = Vec::new();
+    for token in text.split(|ch| ch == '.' || ch == '-' || ch == '_') {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.bytes().all(|b| b >= b'0' && b <= b'9') {
+            let numeric = trimmed.parse::<u64>().unwrap_or(0);
+            out.push((true, numeric, String::new()));
+        } else {
+            out.push((false, 0, trimmed.to_ascii_lowercase()));
+        }
+    }
+    out
+}
+
+fn compare_version_suffix(a: &str, b: &str) -> Ordering {
+    let a_parts = parse_version_components(a);
+    let b_parts = parse_version_components(b);
+    let mut idx = 0usize;
+    loop {
+        let a_part = a_parts.get(idx);
+        let b_part = b_parts.get(idx);
+        match (a_part, b_part) {
+            (None, None) => return Ordering::Equal,
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (Some((a_is_num, a_num, a_text)), Some((b_is_num, b_num, b_text))) => {
+                if *a_is_num && *b_is_num {
+                    if a_num > b_num {
+                        return Ordering::Greater;
+                    }
+                    if a_num < b_num {
+                        return Ordering::Less;
+                    }
+                } else if *a_is_num && !*b_is_num {
+                    return Ordering::Greater;
+                } else if !*a_is_num && *b_is_num {
+                    return Ordering::Less;
+                } else {
+                    let ord = a_text.cmp(b_text);
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                }
+            }
+        }
+        idx += 1;
+    }
+}
+
+fn find_versioned_shared_library_in_dir(search_dir: &Path, base_name: &str, target: u32) -> Option<PathBuf> {
+    let trimmed_name = base_name.trim();
+    if trimmed_name.is_empty() {
+        return None;
+    }
+
+    let prefix = if target_is_macos(target) {
+        format!("lib{}.dylib.", trimmed_name)
+    } else if target_is_linux(target) {
+        format!("lib{}.so.", trimmed_name)
+    } else {
+        return None;
+    };
+
+    let mut best_path: Option<PathBuf> = None;
+    let mut best_suffix = String::new();
+
+    let entries = fs::read_dir(search_dir).ok()?;
+    for entry in entries {
+        let dir_entry = match entry {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let file_type = match dir_entry.file_type() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let file_name = dir_entry.file_name();
+        let file_name_text = file_name.to_string_lossy().to_string();
+        if !file_name_text.starts_with(&prefix) {
+            continue;
+        }
+        let suffix = file_name_text[prefix.len()..].trim().to_string();
+        if suffix.is_empty() {
+            continue;
+        }
+        if best_path.is_none() {
+            best_suffix = suffix;
+            best_path = Some(dir_entry.path());
+            continue;
+        }
+        let cmp = compare_version_suffix(&suffix, &best_suffix);
+        if cmp == Ordering::Greater {
+            best_suffix = suffix;
+            best_path = Some(dir_entry.path());
+        } else if cmp == Ordering::Equal {
+            // Stable deterministic tie-break: lexical absolute path.
+            let next_path = dir_entry.path();
+            let current_text = best_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let next_text = next_path.to_string_lossy().to_string();
+            if next_text < current_text {
+                best_path = Some(next_path);
+            }
+        }
+    }
+
+    best_path
 }
 
 fn target_is_aarch64(target: u32) -> bool {
@@ -950,6 +1101,39 @@ fn archive_member_matches_unresolved_state(state: &LinkerState, path: &Path, ind
     }
     let payload = &raw[member.data_offset..end];
     let defined = archive_member_defined_symbol_hashes(payload);
+    for hash in defined {
+        if needed.contains(&hash) {
+            return 1;
+        }
+    }
+    0
+}
+
+fn object_path_defined_symbol_hashes(path: &Path) -> HashSet<u64> {
+    let raw = match fs::read(path) {
+        Ok(v) => v,
+        Err(_) => return HashSet::new(),
+    };
+    archive_member_defined_symbol_hashes(&raw)
+}
+
+fn start_lib_member_matches_unresolved_state(state: &LinkerState, index: u32) -> u32 {
+    if state.loaded_start_lib_members.contains(&index) {
+        return 0;
+    }
+    let path_handle = match state.start_lib_members.get(index as usize) {
+        Some(v) => *v,
+        None => return 0,
+    };
+    let path = match to_path(path_handle) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let needed = unresolved_required_symbol_hashes(state);
+    if needed.is_empty() {
+        return 0;
+    }
+    let defined = object_path_defined_symbol_hashes(&path);
     for hash in defined {
         if needed.contains(&hash) {
             return 1;
@@ -1705,6 +1889,41 @@ fn encode_elf64_rela_records(records: &[Elf64RelaRecord]) -> Vec<u8> {
     out
 }
 
+fn linker_dynamic_flags_words(state: &LinkerState, z_now: bool) -> (u64, u64) {
+    let mut dt_flags = 0u64;
+    if z_now {
+        dt_flags |= DF_BIND_NOW;
+    }
+    if state.symbolic_bindings || state.symbolic_functions {
+        dt_flags |= DF_SYMBOLIC;
+    }
+
+    let mut dt_flags_1 = 0u64;
+    if z_now {
+        dt_flags_1 |= DF_1_NOW;
+    }
+    if state.symbolic_group {
+        dt_flags_1 |= DF_1_GROUP;
+    }
+    if state.z_nodelete {
+        dt_flags_1 |= DF_1_NODELETE;
+    }
+    if state.z_initfirst {
+        dt_flags_1 |= DF_1_INITFIRST;
+    }
+    if state.z_nodlopen {
+        dt_flags_1 |= DF_1_NOOPEN;
+    }
+    if state.z_origin {
+        dt_flags_1 |= DF_1_ORIGIN;
+    }
+    if state.z_interpose {
+        dt_flags_1 |= DF_1_INTERPOSE;
+    }
+
+    (dt_flags, dt_flags_1)
+}
+
 fn write_minimal_elf_exec(
     path: &Path,
     entry: u64,
@@ -1772,12 +1991,17 @@ fn write_minimal_elf_exec(
         dynstr.push(0);
     }
 
+    let (dt_flags_word, dt_flags_1_word) = linker_dynamic_flags_words(state, z_now);
+    let has_dt_flags = dt_flags_word != 0;
+    let has_dt_flags_1 = dt_flags_1_word != 0;
+
     let dynamic_enabled = et_type == ET_DYN
         || !interp_bytes.is_empty()
         || !needed_offsets.is_empty()
         || soname_offset.is_some()
         || runpath_offset.is_some()
-        || z_now;
+        || has_dt_flags
+        || has_dt_flags_1;
 
     let mut dynsym = if dynamic_enabled { vec![0u8; 24] } else { Vec::new() };
     let tls_synth_rela_records = if dynamic_enabled && machine == EM_AARCH64 {
@@ -1824,8 +2048,11 @@ fn write_minimal_elf_exec(
             dynamic_entries.push((DT_RELASZ, tls_synth_rela_bytes.len() as u64));
             dynamic_entries.push((DT_RELAENT, 24));
         }
-        if z_now {
-            dynamic_entries.push((DT_FLAGS, DF_BIND_NOW));
+        if has_dt_flags {
+            dynamic_entries.push((DT_FLAGS, dt_flags_word));
+        }
+        if has_dt_flags_1 {
+            dynamic_entries.push((DT_FLAGS_1, dt_flags_1_word));
         }
         dynamic_entries.push((DT_NULL, 0));
     }
@@ -2159,6 +2386,63 @@ fn basename_from_token(token: &str) -> String {
         return name.to_string();
     }
     trimmed.to_string()
+}
+
+fn canonical_library_tokens(token: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let base = basename_from_token(token);
+    let trimmed = base.trim();
+    if trimmed.is_empty() {
+        return out;
+    }
+    out.push(trimmed.to_string());
+
+    let mut stem = trimmed.to_string();
+    let lower = stem.to_ascii_lowercase();
+    if lower.ends_with(".lib") {
+        stem = stem[..stem.len().saturating_sub(4)].to_string();
+    } else if lower.ends_with(".a") {
+        stem = stem[..stem.len().saturating_sub(2)].to_string();
+    } else if lower.ends_with(".so") {
+        stem = stem[..stem.len().saturating_sub(3)].to_string();
+    } else if lower.ends_with(".dylib") {
+        stem = stem[..stem.len().saturating_sub(6)].to_string();
+    } else if lower.ends_with(".dll") {
+        stem = stem[..stem.len().saturating_sub(4)].to_string();
+    }
+
+    if !stem.is_empty() {
+        out.push(stem.clone());
+        if let Some(no_prefix) = stem.strip_prefix("lib") {
+            if !no_prefix.is_empty() {
+                out.push(no_prefix.to_string());
+            }
+        } else {
+            out.push(format!("lib{stem}"));
+        }
+    }
+
+    out
+}
+
+fn add_blocked_default_library(state: &mut LinkerState, token: &str) {
+    for candidate in canonical_library_tokens(token) {
+        state
+            .blocked_default_library_hashes
+            .insert(fnv1a64(&candidate));
+    }
+}
+
+fn is_default_library_blocked(state: &LinkerState, token: &str) -> bool {
+    for candidate in canonical_library_tokens(token) {
+        if state
+            .blocked_default_library_hashes
+            .contains(&fnv1a64(&candidate))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn has_shared_suffix(name: &str) -> bool {
@@ -3634,6 +3918,9 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     state.entry = 0x0010_0000;
     state.image_base = 0x0001_0000;
     state.link_as_needed = false;
+    state.symbolic_bindings = false;
+    state.symbolic_functions = false;
+    state.symbolic_group = false;
     state.whole_archive = false;
     state.link_new_dtags = true;
     state.link_copy_dt_needed_entries = false;
@@ -3646,6 +3933,8 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     state.link_pie = false;
     state.link_shared = false;
     state.link_static = false;
+    state.last_shared_object_retained = false;
+    state.use_default_search_paths = true;
     state.hash_style = HASH_STYLE_BOTH;
     state.thread_count = 0;
     state.emit_eh_frame_hdr = true;
@@ -3659,6 +3948,11 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     state.pe_large_address_aware = true;
     state.dependency_file = 0;
     state.emit_relocs = false;
+    state.z_origin = false;
+    state.z_interpose = false;
+    state.z_initfirst = false;
+    state.z_nodelete = false;
+    state.z_nodlopen = false;
 }
 
 fn probe_object_format_bytes(raw: &[u8]) -> u32 {
@@ -4299,6 +4593,34 @@ fn ingest_shared_object_symbols(state: &mut LinkerState, path: &Path) -> u32 {
         OBJECT_FORMAT_UNKNOWN => ERR_INVALID_FORMAT,
         _ => ERR_INVALID_FORMAT,
     }
+}
+
+fn shared_object_contributes_to_unresolved_set(
+    state: &LinkerState,
+    unresolved_before: &HashSet<u64>,
+    globals_before: &HashMap<u64, GlobalSymbol>,
+) -> bool {
+    if unresolved_before.is_empty() {
+        return false;
+    }
+    for hash in unresolved_before {
+        let was_defined = globals_before
+            .get(hash)
+            .map(|g| g.defined == 1)
+            .unwrap_or(false);
+        if was_defined {
+            continue;
+        }
+        let now_defined = state
+            .globals
+            .get(hash)
+            .map(|g| g.defined == 1)
+            .unwrap_or(false);
+        if now_defined {
+            return true;
+        }
+    }
+    false
 }
 
 fn coff_characteristics_to_flags(characteristics: u32, section_name: &str) -> (u32, u64) {
@@ -5792,6 +6114,30 @@ pub extern "C" fn host_path_join(base: u64, leaf: u64) -> u64 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_find_versioned_shared_in_path(search_path: u64, name: u64, target: u32) -> u64 {
+    let base = match to_path(search_path) {
+        Some(v) => v,
+        None => return 0,
+    };
+    if !base.is_dir() {
+        return 0;
+    }
+    let name_text = match read_c_string(name) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let lib_name = name_text.trim();
+    if lib_name.is_empty() {
+        return 0;
+    }
+    let resolved = match find_versioned_shared_library_in_dir(&base, lib_name, target) {
+        Some(v) => v,
+        None => return 0,
+    };
+    intern_string(resolved.to_string_lossy().to_string())
+}
+
+#[no_mangle]
 pub extern "C" fn host_str_concat(lhs: u64, rhs: u64) -> u64 {
     let text = format!("{}{}", as_string_or_number(lhs), as_string_or_number(rhs));
     intern_string(text)
@@ -6191,12 +6537,21 @@ pub extern "C" fn host_linker_set_z_option(option: u64) -> u32 {
         }
         "muldefs" => state.allow_multiple_definition = true,
         "nomuldefs" => state.allow_multiple_definition = false,
+        "origin" => state.z_origin = true,
+        "noorigin" => state.z_origin = false,
+        "interpose" => state.z_interpose = true,
+        "nointerpose" => state.z_interpose = false,
+        "initfirst" => state.z_initfirst = true,
+        "noinitfirst" => state.z_initfirst = false,
+        "nodelete" => state.z_nodelete = true,
+        "nonodelete" => state.z_nodelete = false,
+        "nodlopen" => state.z_nodlopen = true,
+        "nonodlopen" => state.z_nodlopen = false,
         // Accepted compatibility spellings that currently do not change emit policy.
-        "text" | "notext" | "origin" | "separate-code" | "noseparate-code"
+        "text" | "notext" | "separate-code" | "noseparate-code"
         | "pack-relative-relocs" | "nopack-relative-relocs" | "start-stop-gc"
         | "nostart-stop-gc" | "ibt" | "noibt" | "ibtplt" | "noibtplt"
-        | "shstk" | "noshstk" | "nodelete" | "nodlopen" | "initfirst"
-        | "interpose" => {}
+        | "shstk" | "noshstk" => {}
         _ => {
             if text.starts_with("max-page-size=")
                 || text.starts_with("common-page-size=")
@@ -6224,6 +6579,20 @@ pub extern "C" fn host_linker_get_z_flags() -> u32 {
         flags |= 4;
     }
     flags
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_dynamic_dt_flags() -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    let (dt_flags, _) = linker_dynamic_flags_words(&state, state.z_now);
+    dt_flags
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_dynamic_dt_flags_1() -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    let (_, dt_flags_1) = linker_dynamic_flags_words(&state, state.z_now);
+    dt_flags_1
 }
 
 #[no_mangle]
@@ -6359,10 +6728,141 @@ pub extern "C" fn host_linker_group_depth() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_start_lib_push_start() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let member_count = state.start_lib_members.len() as u32;
+    state.group_start_lib_starts.push(member_count);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_pop_start() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.group_start_lib_starts.pop().unwrap_or(u32::MAX)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_depth() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.group_start_lib_starts.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_register_member(path: u64) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.start_lib_members.push(path);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_member_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.start_lib_members.len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_start_lib_member(index: u32) -> u64 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.start_lib_members.get(index as usize).copied().unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_member_is_loaded(index: u32) -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.loaded_start_lib_members.contains(&index) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_member_mark_loaded(index: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    if state.loaded_start_lib_members.insert(index) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_member_matches_unresolved(index: u32) -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    start_lib_member_matches_unresolved_state(&state, index)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_progress_reset() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.start_lib_progress = 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_progress_add(delta: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.start_lib_progress = state.start_lib_progress.saturating_add(delta);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_start_lib_progress_get() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.start_lib_progress
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_add_search_path(path: u64) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.search_paths.push(path);
     set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_use_default_search_paths(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.use_default_search_paths = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_use_default_search_paths() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.use_default_search_paths { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_block_default_library(name: u64) -> u32 {
+    let text = match read_c_string(name) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return ERR_INVALID_FORMAT;
+    }
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    add_blocked_default_library(&mut state, trimmed);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_is_default_library_blocked(name: u64) -> u32 {
+    let text = match read_c_string(name) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let state = linker().lock().expect("linker mutex poisoned");
+    if is_default_library_blocked(&state, trimmed) {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
@@ -6496,11 +6996,59 @@ pub extern "C" fn host_linker_get_as_needed() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_set_symbolic_bindings(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.symbolic_bindings = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_symbolic_bindings() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.symbolic_bindings { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_symbolic_functions(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.symbolic_functions = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_symbolic_functions() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.symbolic_functions { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_symbolic_group(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.symbolic_group = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_symbolic_group() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.symbolic_group { 1 } else { 0 }
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_push_state() -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     let snapshot = LinkerOptionState {
         link_static: state.link_static,
         link_as_needed: state.link_as_needed,
+        symbolic_bindings: state.symbolic_bindings,
+        symbolic_functions: state.symbolic_functions,
+        symbolic_group: state.symbolic_group,
+        z_origin: state.z_origin,
+        z_interpose: state.z_interpose,
+        z_initfirst: state.z_initfirst,
+        z_nodelete: state.z_nodelete,
+        z_nodlopen: state.z_nodlopen,
+        use_default_search_paths: state.use_default_search_paths,
         whole_archive: state.whole_archive,
         link_new_dtags: state.link_new_dtags,
         link_copy_dt_needed_entries: state.link_copy_dt_needed_entries,
@@ -6523,6 +7071,15 @@ pub extern "C" fn host_linker_pop_state() -> u32 {
     };
     state.link_static = snapshot.link_static;
     state.link_as_needed = snapshot.link_as_needed;
+    state.symbolic_bindings = snapshot.symbolic_bindings;
+    state.symbolic_functions = snapshot.symbolic_functions;
+    state.symbolic_group = snapshot.symbolic_group;
+    state.z_origin = snapshot.z_origin;
+    state.z_interpose = snapshot.z_interpose;
+    state.z_initfirst = snapshot.z_initfirst;
+    state.z_nodelete = snapshot.z_nodelete;
+    state.z_nodlopen = snapshot.z_nodlopen;
+    state.use_default_search_paths = snapshot.use_default_search_paths;
     state.whole_archive = snapshot.whole_archive;
     state.link_new_dtags = snapshot.link_new_dtags;
     state.link_copy_dt_needed_entries = snapshot.link_copy_dt_needed_entries;
@@ -6937,6 +7494,12 @@ pub extern "C" fn host_linker_shared_undefined_symbol_count() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_last_shared_object_retained() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.last_shared_object_retained { 1 } else { 0 }
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_needed_library_count() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
     state.needed_shared_libs.len() as u32
@@ -7045,14 +7608,36 @@ pub extern "C" fn host_linker_ingest_shared_object(path: u64) -> u32 {
         None => return ERR_FILE_NOT_FOUND,
     };
     let mut state = linker().lock().expect("linker mutex poisoned");
+    state.last_shared_object_retained = false;
     let unresolved_before = state.shared_undefined_symbols.len();
+    let globals_before = state.globals.clone();
+    let shared_undefined_before = state.shared_undefined_symbols.clone();
+    let unresolved_required_before = unresolved_required_symbol_hashes(&state);
+    let as_needed = state.link_as_needed;
     let status = ingest_shared_object_symbols(&mut state, &p);
     if status != ERR_OK {
+        state.globals = globals_before;
+        state.shared_undefined_symbols = shared_undefined_before;
         return set_last_error(&mut state, status);
     }
+    if as_needed {
+        let contributes = shared_object_contributes_to_unresolved_set(
+            &state,
+            &unresolved_required_before,
+            &globals_before,
+        );
+        if !contributes {
+            state.globals = globals_before;
+            state.shared_undefined_symbols = shared_undefined_before;
+            return set_last_error(&mut state, ERR_OK);
+        }
+    }
     if !state.allow_shlib_undefined && state.shared_undefined_symbols.len() > unresolved_before {
+        state.globals = globals_before;
+        state.shared_undefined_symbols = shared_undefined_before;
         return set_last_error(&mut state, ERR_UNDEFINED_SYMBOL);
     }
+    state.last_shared_object_retained = true;
     set_last_error(&mut state, ERR_OK)
 }
 
@@ -8073,6 +8658,33 @@ mod tests {
         String::from_utf8_lossy(&rest[..end]).to_string()
     }
 
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("{}_{}_{}", name, std::process::id(), nanos))
+    }
+
+    fn write_minimal_shared_coff(path: &Path, exported_name: &str) {
+        let mut raw = vec![0u8; 20];
+        raw[0..2].copy_from_slice(&COFF_MACHINE_X86_64.to_le_bytes());
+        raw[8..12].copy_from_slice(&(20u32).to_le_bytes()); // symbol table offset
+        raw[12..16].copy_from_slice(&(1u32).to_le_bytes()); // one symbol
+
+        let mut sym = vec![0u8; 18];
+        let name_bytes = exported_name.as_bytes();
+        let limit = name_bytes.len().min(8);
+        sym[0..limit].copy_from_slice(&name_bytes[0..limit]);
+        sym[12..14].copy_from_slice(&(1i16).to_le_bytes()); // section_number > 0 => defined
+        sym[16] = STORAGE_CLASS_EXTERNAL;
+        sym[17] = 0;
+        raw.extend_from_slice(&sym);
+        raw.extend_from_slice(&(4u32).to_le_bytes()); // empty string table header
+
+        fs::write(path, &raw).expect("write minimal shared coff");
+    }
+
     #[test]
     fn aarch64_tls_synth_elf_emits_symbol_aware_dynsym_and_rela() {
         let mut state = LinkerState::default();
@@ -8228,10 +8840,14 @@ mod tests {
         assert_eq!(host_linker_reset_state(), ERR_OK);
         assert_eq!(host_linker_set_static(0), ERR_OK);
         assert_eq!(host_linker_set_as_needed(0), ERR_OK);
+        assert_eq!(host_linker_set_symbolic_bindings(0), ERR_OK);
+        assert_eq!(host_linker_set_symbolic_functions(0), ERR_OK);
+        assert_eq!(host_linker_set_symbolic_group(0), ERR_OK);
         assert_eq!(host_linker_set_whole_archive(0), ERR_OK);
         assert_eq!(host_linker_set_new_dtags(1), ERR_OK);
         assert_eq!(host_linker_set_copy_dt_needed_entries(0), ERR_OK);
         assert_eq!(host_linker_set_no_undefined(0), ERR_OK);
+        assert_eq!(host_linker_set_use_default_search_paths(1), ERR_OK);
         assert_eq!(host_linker_set_allow_shlib_undefined(1), ERR_OK);
         assert_eq!(host_linker_set_unresolved_policy(UNRESOLVED_POLICY_REPORT_ALL), ERR_OK);
         assert_eq!(host_linker_set_warn_unresolved(0), ERR_OK);
@@ -8240,10 +8856,14 @@ mod tests {
         assert_eq!(host_linker_push_state(), ERR_OK);
         assert_eq!(host_linker_set_static(1), ERR_OK);
         assert_eq!(host_linker_set_as_needed(1), ERR_OK);
+        assert_eq!(host_linker_set_symbolic_bindings(1), ERR_OK);
+        assert_eq!(host_linker_set_symbolic_functions(1), ERR_OK);
+        assert_eq!(host_linker_set_symbolic_group(1), ERR_OK);
         assert_eq!(host_linker_set_whole_archive(1), ERR_OK);
         assert_eq!(host_linker_set_new_dtags(0), ERR_OK);
         assert_eq!(host_linker_set_copy_dt_needed_entries(1), ERR_OK);
         assert_eq!(host_linker_set_no_undefined(1), ERR_OK);
+        assert_eq!(host_linker_set_use_default_search_paths(0), ERR_OK);
         assert_eq!(host_linker_set_allow_shlib_undefined(0), ERR_OK);
         assert_eq!(host_linker_set_unresolved_policy(UNRESOLVED_POLICY_IGNORE_ALL), ERR_OK);
         assert_eq!(host_linker_set_warn_unresolved(1), ERR_OK);
@@ -8252,10 +8872,14 @@ mod tests {
         assert_eq!(host_linker_pop_state(), ERR_OK);
         assert_eq!(host_linker_get_static(), 0);
         assert_eq!(host_linker_get_as_needed(), 0);
+        assert_eq!(host_linker_get_symbolic_bindings(), 0);
+        assert_eq!(host_linker_get_symbolic_functions(), 0);
+        assert_eq!(host_linker_get_symbolic_group(), 0);
         assert_eq!(host_linker_get_whole_archive(), 0);
         assert_eq!(host_linker_get_new_dtags(), 1);
         assert_eq!(host_linker_get_copy_dt_needed_entries(), 0);
         assert_eq!(host_linker_get_no_undefined(), 0);
+        assert_eq!(host_linker_get_use_default_search_paths(), 1);
         assert_eq!(host_linker_get_allow_shlib_undefined(), 1);
         assert_eq!(host_linker_get_unresolved_policy(), UNRESOLVED_POLICY_REPORT_ALL);
         assert_eq!(host_linker_get_warn_unresolved(), 0);
@@ -8266,6 +8890,51 @@ mod tests {
     fn linker_pop_state_without_push_reports_conflict() {
         assert_eq!(host_linker_reset_state(), ERR_OK);
         assert_eq!(host_linker_pop_state(), ERR_CONFLICTING_OPTIONS);
+    }
+
+    #[test]
+    fn start_lib_push_pop_roundtrip_and_member_registration() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_start_lib_depth(), 0);
+        assert_eq!(host_linker_start_lib_push_start(), ERR_OK);
+        assert_eq!(host_linker_start_lib_depth(), 1);
+
+        assert_eq!(host_linker_start_lib_member_count(), 0);
+        assert_eq!(host_linker_start_lib_register_member(intern_string("a.o")), ERR_OK);
+        assert_eq!(host_linker_start_lib_register_member(intern_string("b.o")), ERR_OK);
+        assert_eq!(host_linker_start_lib_member_count(), 2);
+        assert_ne!(host_linker_get_start_lib_member(0), 0);
+        assert_ne!(host_linker_get_start_lib_member(1), 0);
+
+        assert_eq!(host_linker_start_lib_member_is_loaded(0), 0);
+        assert_eq!(host_linker_start_lib_member_mark_loaded(0), 1);
+        assert_eq!(host_linker_start_lib_member_mark_loaded(0), 0);
+        assert_eq!(host_linker_start_lib_member_is_loaded(0), 1);
+
+        assert_eq!(host_linker_start_lib_progress_reset(), ERR_OK);
+        assert_eq!(host_linker_start_lib_progress_get(), 0);
+        assert_eq!(host_linker_start_lib_progress_add(2), ERR_OK);
+        assert_eq!(host_linker_start_lib_progress_get(), 2);
+
+        assert_eq!(host_linker_start_lib_pop_start(), 0);
+        assert_eq!(host_linker_start_lib_depth(), 0);
+        assert_eq!(host_linker_start_lib_pop_start(), u32::MAX);
+    }
+
+    #[test]
+    fn default_library_search_and_blocklist_roundtrip() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_get_use_default_search_paths(), 1);
+        assert_eq!(host_linker_set_use_default_search_paths(0), ERR_OK);
+        assert_eq!(host_linker_get_use_default_search_paths(), 0);
+        assert_eq!(host_linker_set_use_default_search_paths(1), ERR_OK);
+        assert_eq!(host_linker_get_use_default_search_paths(), 1);
+
+        assert_eq!(host_linker_block_default_library(intern_string("kernel32.lib")), ERR_OK);
+        assert_eq!(host_linker_is_default_library_blocked(intern_string("kernel32.lib")), 1);
+        assert_eq!(host_linker_is_default_library_blocked(intern_string("kernel32")), 1);
+        assert_eq!(host_linker_is_default_library_blocked(intern_string("libkernel32.a")), 1);
+        assert_eq!(host_linker_is_default_library_blocked(intern_string("user32")), 0);
     }
 
     #[test]
@@ -8291,6 +8960,37 @@ mod tests {
     }
 
     #[test]
+    fn z_option_flags1_semantics_are_toggleable() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_set_symbolic_group(1), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("origin")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("interpose")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("initfirst")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("nodelete")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("nodlopen")), ERR_OK);
+
+        let flags1 = host_linker_get_dynamic_dt_flags_1();
+        assert_eq!(flags1 & DF_1_GROUP, DF_1_GROUP);
+        assert_eq!(flags1 & DF_1_ORIGIN, DF_1_ORIGIN);
+        assert_eq!(flags1 & DF_1_INTERPOSE, DF_1_INTERPOSE);
+        assert_eq!(flags1 & DF_1_INITFIRST, DF_1_INITFIRST);
+        assert_eq!(flags1 & DF_1_NODELETE, DF_1_NODELETE);
+        assert_eq!(flags1 & DF_1_NOOPEN, DF_1_NOOPEN);
+
+        assert_eq!(host_linker_set_z_option(intern_string("noorigin")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("nointerpose")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("noinitfirst")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("nonodelete")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("nonodlopen")), ERR_OK);
+        let flags1_cleared = host_linker_get_dynamic_dt_flags_1();
+        assert_eq!(flags1_cleared & DF_1_ORIGIN, 0);
+        assert_eq!(flags1_cleared & DF_1_INTERPOSE, 0);
+        assert_eq!(flags1_cleared & DF_1_INITFIRST, 0);
+        assert_eq!(flags1_cleared & DF_1_NODELETE, 0);
+        assert_eq!(flags1_cleared & DF_1_NOOPEN, 0);
+    }
+
+    #[test]
     fn dynamic_unresolved_gate_requires_shared_mode_and_non_strict_resolution() {
         assert_eq!(host_linker_reset_state(), ERR_OK);
         assert_eq!(host_linker_allow_dynamic_unresolved(), 0);
@@ -8303,6 +9003,194 @@ mod tests {
 
         assert_eq!(host_linker_set_no_undefined(1), ERR_OK);
         assert_eq!(host_linker_allow_dynamic_unresolved(), 0);
+    }
+
+    #[test]
+    fn elf_dynamic_flags_include_symbolic_when_enabled() {
+        let mut state = LinkerState::default();
+        reset_linker_state_defaults(&mut state);
+        state.target = TARGET_X86_64_LINUX;
+        state.output_format = FORMAT_ELF64;
+        state.image_base = 0x0040_0000;
+        state.entry = 0x0040_1000;
+        state.link_shared = true;
+        state.symbolic_bindings = true;
+        state.symbolic_functions = false;
+
+        let object = ObjectRecord {
+            path: 0,
+            file_size: 4,
+            elf_type: ET_EXEC,
+            machine: EM_X86_64,
+            sections: vec![ObjectSection {
+                index: 1,
+                section_type: SHT_PROGBITS,
+                flags: SHF_ALLOC | SHF_EXECINSTR,
+                offset: 0,
+                size: 4,
+                link: 0,
+                info: 0,
+                align: 16,
+                entsize: 0,
+                data: vec![0x90, 0x90, 0x90, 0x90],
+            }],
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+        };
+        state.objects.push(object);
+
+        let temp = std::env::temp_dir().join("dustlink_dynamic_flags_symbolic_x86_64.elf");
+        let _ = fs::remove_file(&temp);
+        let rc = write_elf_output_for_state(&temp, &state, state.entry, state.image_base);
+        assert_eq!(rc, ERR_OK);
+        let raw = fs::read(&temp).expect("read dynamic flags fixture");
+        let _ = fs::remove_file(&temp);
+
+        let tags = dynamic_tag_map(&raw);
+        let dt_flags = tags.get(&DT_FLAGS).copied().unwrap_or(0);
+        assert_eq!(dt_flags & DF_SYMBOLIC, DF_SYMBOLIC);
+    }
+
+    #[test]
+    fn elf_dynamic_flags1_include_group_and_z_semantics_when_enabled() {
+        let mut state = LinkerState::default();
+        reset_linker_state_defaults(&mut state);
+        state.target = TARGET_X86_64_LINUX;
+        state.output_format = FORMAT_ELF64;
+        state.image_base = 0x0040_0000;
+        state.entry = 0x0040_1000;
+        state.link_shared = true;
+        state.symbolic_group = true;
+        state.z_origin = true;
+        state.z_interpose = true;
+        state.z_initfirst = true;
+        state.z_nodelete = true;
+        state.z_nodlopen = true;
+
+        let object = ObjectRecord {
+            path: 0,
+            file_size: 4,
+            elf_type: ET_EXEC,
+            machine: EM_X86_64,
+            sections: vec![ObjectSection {
+                index: 1,
+                section_type: SHT_PROGBITS,
+                flags: SHF_ALLOC | SHF_EXECINSTR,
+                offset: 0,
+                size: 4,
+                link: 0,
+                info: 0,
+                align: 16,
+                entsize: 0,
+                data: vec![0x90, 0x90, 0x90, 0x90],
+            }],
+            symbols: Vec::new(),
+            relocations: Vec::new(),
+        };
+        state.objects.push(object);
+
+        let temp = std::env::temp_dir().join("dustlink_dynamic_flags1_semantics_x86_64.elf");
+        let _ = fs::remove_file(&temp);
+        let rc = write_elf_output_for_state(&temp, &state, state.entry, state.image_base);
+        assert_eq!(rc, ERR_OK);
+        let raw = fs::read(&temp).expect("read dynamic flags1 fixture");
+        let _ = fs::remove_file(&temp);
+
+        let tags = dynamic_tag_map(&raw);
+        let dt_flags_1 = tags.get(&DT_FLAGS_1).copied().unwrap_or(0);
+        assert_eq!(dt_flags_1 & DF_1_GROUP, DF_1_GROUP);
+        assert_eq!(dt_flags_1 & DF_1_ORIGIN, DF_1_ORIGIN);
+        assert_eq!(dt_flags_1 & DF_1_INTERPOSE, DF_1_INTERPOSE);
+        assert_eq!(dt_flags_1 & DF_1_INITFIRST, DF_1_INITFIRST);
+        assert_eq!(dt_flags_1 & DF_1_NODELETE, DF_1_NODELETE);
+        assert_eq!(dt_flags_1 & DF_1_NOOPEN, DF_1_NOOPEN);
+    }
+
+    #[test]
+    fn as_needed_drops_non_contributing_shared_object_without_symbol_leak() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_set_target(TARGET_X86_64_WINDOWS), ERR_OK);
+        assert_eq!(host_linker_set_as_needed(1), ERR_OK);
+
+        {
+            let mut state = linker().lock().expect("linker mutex poisoned");
+            state.objects.push(ObjectRecord {
+                symbols: vec![ObjectSymbol {
+                    name_hash: fnv1a64("bar"),
+                    bind: STB_GLOBAL,
+                    shndx: SHN_UNDEF,
+                    ..ObjectSymbol::default()
+                }],
+                ..ObjectRecord::default()
+            });
+        }
+
+        let path = unique_temp_path("dustlink_as_needed_drop_non_contrib.obj");
+        write_minimal_shared_coff(&path, "foo");
+        let handle = intern_string(path.to_string_lossy().to_string());
+        let status = host_linker_ingest_shared_object(handle);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(status, ERR_OK);
+        assert_eq!(host_linker_last_shared_object_retained(), 0);
+        assert_eq!(host_linker_global_symbol_defined(fnv1a64("foo")), 0);
+        assert_eq!(host_linker_unresolved_symbol_count(), 1);
+    }
+
+    #[test]
+    fn as_needed_retains_contributing_shared_object_and_exports_symbol() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_set_target(TARGET_X86_64_WINDOWS), ERR_OK);
+        assert_eq!(host_linker_set_as_needed(1), ERR_OK);
+
+        {
+            let mut state = linker().lock().expect("linker mutex poisoned");
+            state.objects.push(ObjectRecord {
+                symbols: vec![ObjectSymbol {
+                    name_hash: fnv1a64("foo"),
+                    bind: STB_GLOBAL,
+                    shndx: SHN_UNDEF,
+                    ..ObjectSymbol::default()
+                }],
+                ..ObjectRecord::default()
+            });
+        }
+
+        let path = unique_temp_path("dustlink_as_needed_keep_contrib.obj");
+        write_minimal_shared_coff(&path, "foo");
+        let handle = intern_string(path.to_string_lossy().to_string());
+        let status = host_linker_ingest_shared_object(handle);
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(status, ERR_OK);
+        assert_eq!(host_linker_last_shared_object_retained(), 1);
+        assert_eq!(host_linker_global_symbol_defined(fnv1a64("foo")), 1);
+        assert_eq!(host_linker_unresolved_symbol_count(), 0);
+    }
+
+    #[test]
+    fn versioned_shared_lookup_prefers_highest_linux_suffix() {
+        let dir = unique_temp_path("dustlink_versioned_so_lookup");
+        fs::create_dir_all(&dir).expect("create temp lookup dir");
+        let f1 = dir.join("libfoo.so.1");
+        let f2 = dir.join("libfoo.so.9");
+        let f3 = dir.join("libfoo.so.10");
+        fs::write(&f1, b"a").expect("write f1");
+        fs::write(&f2, b"b").expect("write f2");
+        fs::write(&f3, b"c").expect("write f3");
+
+        let dir_h = intern_string(dir.to_string_lossy().to_string());
+        let lib_h = intern_string("foo");
+        let found_h = host_linker_find_versioned_shared_in_path(dir_h, lib_h, TARGET_X86_64_LINUX);
+        let found = read_c_string(found_h).unwrap_or_default();
+
+        assert!(!found.is_empty());
+        assert!(found.ends_with("libfoo.so.10"));
+
+        let _ = fs::remove_file(&f1);
+        let _ = fs::remove_file(&f2);
+        let _ = fs::remove_file(&f3);
+        let _ = fs::remove_dir(&dir);
     }
 
     #[test]
