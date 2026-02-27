@@ -231,6 +231,16 @@ struct Elf64RelaRecord {
     addend: u64,
 }
 
+#[derive(Clone, Copy, Default)]
+struct LinkerOptionState {
+    link_static: bool,
+    link_as_needed: bool,
+    whole_archive: bool,
+    link_new_dtags: bool,
+    link_copy_dt_needed_entries: bool,
+    no_undefined: bool,
+}
+
 #[derive(Default)]
 struct LinkerState {
     last_error: u64,
@@ -267,6 +277,7 @@ struct LinkerState {
     loaded_archive_members: HashSet<String>,
     archive_progress: u32,
     group_archive_starts: Vec<u32>,
+    option_state_stack: Vec<LinkerOptionState>,
     link_shared: bool,
     link_pie: bool,
     link_static: bool,
@@ -6135,9 +6146,23 @@ pub extern "C" fn host_linker_set_z_option(option: u64) -> u32 {
         "noexecstack" => state.z_execstack = false,
         "defs" => state.no_undefined = true,
         "undefs" => state.no_undefined = false,
+        "muldefs" => state.allow_multiple_definition = true,
+        "nomuldefs" => state.allow_multiple_definition = false,
         // Accepted compatibility spellings that currently do not change emit policy.
-        "text" | "notext" | "origin" => {}
-        _ => return set_last_error(&mut state, ERR_UNSUPPORTED_FLAG),
+        "text" | "notext" | "origin" | "separate-code" | "noseparate-code"
+        | "pack-relative-relocs" | "nopack-relative-relocs" | "start-stop-gc"
+        | "nostart-stop-gc" | "ibt" | "noibt" | "ibtplt" | "noibtplt"
+        | "shstk" | "noshstk" | "nodelete" | "nodlopen" | "initfirst"
+        | "interpose" => {}
+        _ => {
+            if text.starts_with("max-page-size=")
+                || text.starts_with("common-page-size=")
+                || text.starts_with("stack-size=")
+            {
+            } else {
+                return set_last_error(&mut state, ERR_UNSUPPORTED_FLAG);
+            }
+        }
     }
     set_last_error(&mut state, ERR_OK)
 }
@@ -6417,6 +6442,37 @@ pub extern "C" fn host_linker_set_as_needed(enabled: u32) -> u32 {
 pub extern "C" fn host_linker_get_as_needed() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
     if state.link_as_needed { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_push_state() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let snapshot = LinkerOptionState {
+        link_static: state.link_static,
+        link_as_needed: state.link_as_needed,
+        whole_archive: state.whole_archive,
+        link_new_dtags: state.link_new_dtags,
+        link_copy_dt_needed_entries: state.link_copy_dt_needed_entries,
+        no_undefined: state.no_undefined,
+    };
+    state.option_state_stack.push(snapshot);
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_pop_state() -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let snapshot = match state.option_state_stack.pop() {
+        Some(v) => v,
+        None => return set_last_error(&mut state, ERR_CONFLICTING_OPTIONS),
+    };
+    state.link_static = snapshot.link_static;
+    state.link_as_needed = snapshot.link_as_needed;
+    state.whole_archive = snapshot.whole_archive;
+    state.link_new_dtags = snapshot.link_new_dtags;
+    state.link_copy_dt_needed_entries = snapshot.link_copy_dt_needed_entries;
+    state.no_undefined = snapshot.no_undefined;
+    set_last_error(&mut state, ERR_OK)
 }
 
 #[no_mangle]
@@ -7978,5 +8034,53 @@ mod tests {
 
         let emitted = &raw[load_off..load_off + section_bytes.len()];
         assert_eq!(emitted, section_bytes.as_slice());
+    }
+
+    #[test]
+    fn linker_push_pop_state_restores_core_link_policies() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_set_static(0), ERR_OK);
+        assert_eq!(host_linker_set_as_needed(0), ERR_OK);
+        assert_eq!(host_linker_set_whole_archive(0), ERR_OK);
+        assert_eq!(host_linker_set_new_dtags(1), ERR_OK);
+        assert_eq!(host_linker_set_copy_dt_needed_entries(0), ERR_OK);
+        assert_eq!(host_linker_set_no_undefined(0), ERR_OK);
+
+        assert_eq!(host_linker_push_state(), ERR_OK);
+        assert_eq!(host_linker_set_static(1), ERR_OK);
+        assert_eq!(host_linker_set_as_needed(1), ERR_OK);
+        assert_eq!(host_linker_set_whole_archive(1), ERR_OK);
+        assert_eq!(host_linker_set_new_dtags(0), ERR_OK);
+        assert_eq!(host_linker_set_copy_dt_needed_entries(1), ERR_OK);
+        assert_eq!(host_linker_set_no_undefined(1), ERR_OK);
+
+        assert_eq!(host_linker_pop_state(), ERR_OK);
+        assert_eq!(host_linker_get_static(), 0);
+        assert_eq!(host_linker_get_as_needed(), 0);
+        assert_eq!(host_linker_get_whole_archive(), 0);
+        assert_eq!(host_linker_get_new_dtags(), 1);
+        assert_eq!(host_linker_get_copy_dt_needed_entries(), 0);
+        assert_eq!(host_linker_get_no_undefined(), 0);
+    }
+
+    #[test]
+    fn linker_pop_state_without_push_reports_conflict() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_pop_state(), ERR_CONFLICTING_OPTIONS);
+    }
+
+    #[test]
+    fn z_option_muldefs_and_extended_compat_tokens_are_accepted() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("muldefs")), ERR_OK);
+        assert_eq!(host_linker_get_allow_multiple_definition(), 1);
+        assert_eq!(host_linker_set_z_option(intern_string("nomuldefs")), ERR_OK);
+        assert_eq!(host_linker_get_allow_multiple_definition(), 0);
+
+        assert_eq!(host_linker_set_z_option(intern_string("separate-code")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("pack-relative-relocs")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("max-page-size=0x1000")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("common-page-size=0x1000")), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("stack-size=0x400000")), ERR_OK);
     }
 }
