@@ -95,6 +95,11 @@ const ICF_MODE_NONE: u32 = 0;
 const ICF_MODE_SAFE: u32 = 1;
 const ICF_MODE_ALL: u32 = 2;
 
+const UNRESOLVED_POLICY_REPORT_ALL: u32 = 0;
+const UNRESOLVED_POLICY_IGNORE_ALL: u32 = 1;
+const UNRESOLVED_POLICY_IGNORE_IN_OBJECT_FILES: u32 = 2;
+const UNRESOLVED_POLICY_IGNORE_IN_SHARED_LIBS: u32 = 3;
+
 const OBJECT_FORMAT_UNKNOWN: u32 = 0;
 const OBJECT_FORMAT_ELF64: u32 = 1;
 const OBJECT_FORMAT_COFF64: u32 = 2;
@@ -239,6 +244,10 @@ struct LinkerOptionState {
     link_new_dtags: bool,
     link_copy_dt_needed_entries: bool,
     no_undefined: bool,
+    allow_shlib_undefined: bool,
+    unresolved_policy: u32,
+    warn_unresolved: bool,
+    trace_enabled: bool,
 }
 
 #[derive(Default)]
@@ -286,6 +295,12 @@ struct LinkerState {
     link_new_dtags: bool,
     link_copy_dt_needed_entries: bool,
     no_undefined: bool,
+    allow_shlib_undefined: bool,
+    unresolved_policy: u32,
+    warn_unresolved: bool,
+    trace_enabled: bool,
+    trace_symbol_hashes: Vec<u64>,
+    shared_undefined_symbols: HashSet<u64>,
     sysroot_path: u64,
     rpaths: Vec<u64>,
     rpath_links: Vec<u64>,
@@ -3623,6 +3638,10 @@ fn reset_linker_state_defaults(state: &mut LinkerState) {
     state.link_new_dtags = true;
     state.link_copy_dt_needed_entries = false;
     state.no_undefined = false;
+    state.allow_shlib_undefined = true;
+    state.unresolved_policy = UNRESOLVED_POLICY_REPORT_ALL;
+    state.warn_unresolved = false;
+    state.trace_enabled = false;
     state.sysroot_path = 0;
     state.link_pie = false;
     state.link_shared = false;
@@ -3717,6 +3736,15 @@ fn add_shared_global_symbol(state: &mut LinkerState, name: &str) {
             },
         );
     }
+}
+
+fn note_shared_undefined_symbol(state: &mut LinkerState, name: &str) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let hash = fnv1a64(trimmed);
+    state.shared_undefined_symbols.insert(hash);
 }
 
 fn read_c_string_from_bytes(raw: &[u8], start: usize) -> Option<String> {
@@ -3894,13 +3922,14 @@ fn ingest_shared_elf_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
             Some(v) => v,
             None => continue,
         };
-        if st_shndx == SHN_UNDEF {
-            continue;
-        }
         let name = match dynstr_symbol_name(raw, dynstr_off, dynstr_size, st_name) {
             Some(v) if !v.is_empty() => v,
             _ => continue,
         };
+        if st_shndx == SHN_UNDEF {
+            note_shared_undefined_symbol(state, &name);
+            continue;
+        }
         add_shared_global_symbol(state, &name);
     }
 
@@ -4087,8 +4116,12 @@ fn ingest_shared_coff_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
 
         let is_external =
             storage_class == STORAGE_CLASS_EXTERNAL || storage_class == STORAGE_CLASS_WEAK_EXTERNAL;
-        if is_external && section_number > 0 {
-            add_shared_global_symbol(state, &name);
+        if is_external {
+            if section_number > 0 {
+                add_shared_global_symbol(state, &name);
+            } else {
+                note_shared_undefined_symbol(state, &name);
+            }
         }
 
         raw_index = raw_index.saturating_add(1 + aux_count);
@@ -4227,7 +4260,7 @@ fn ingest_shared_macho_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
         let is_external = (n_type & 0x01) != 0;
         let is_private_extern = (n_type & 0x10) != 0;
         let is_stab = (n_type & 0xe0) != 0;
-        if !is_external || is_private_extern || is_stab || n_type_kind == 0x00 || strx >= strtab.len() {
+        if !is_external || is_private_extern || is_stab || strx >= strtab.len() {
             continue;
         }
         let rel = &strtab[strx..];
@@ -4236,6 +4269,10 @@ fn ingest_shared_macho_symbols(state: &mut LinkerState, raw: &[u8]) -> u32 {
             continue;
         }
         let name = String::from_utf8_lossy(&rel[..end]).to_string();
+        if n_type_kind == 0x00 {
+            note_shared_undefined_symbol(state, &name);
+            continue;
+        }
         add_shared_global_symbol(state, &name);
         if let Some(stripped) = name.strip_prefix('_') {
             if !stripped.is_empty() {
@@ -6144,8 +6181,14 @@ pub extern "C" fn host_linker_set_z_option(option: u64) -> u32 {
         "lazy" => state.z_now = false,
         "execstack" => state.z_execstack = true,
         "noexecstack" => state.z_execstack = false,
-        "defs" => state.no_undefined = true,
-        "undefs" => state.no_undefined = false,
+        "defs" => {
+            state.no_undefined = true;
+            state.allow_shlib_undefined = false;
+        }
+        "undefs" => {
+            state.no_undefined = false;
+            state.allow_shlib_undefined = true;
+        }
         "muldefs" => state.allow_multiple_definition = true,
         "nomuldefs" => state.allow_multiple_definition = false,
         // Accepted compatibility spellings that currently do not change emit policy.
@@ -6277,6 +6320,10 @@ pub extern "C" fn host_linker_set_os(os: u32) -> u32 {
 pub extern "C" fn host_linker_register_input(path: u64) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.inputs.push(path);
+    if state.trace_enabled {
+        let msg = format!("dustlink: trace: input {}", as_string_or_number(path));
+        eprintln!("{msg}");
+    }
     set_last_error(&mut state, ERR_OK)
 }
 
@@ -6284,6 +6331,10 @@ pub extern "C" fn host_linker_register_input(path: u64) -> u32 {
 pub extern "C" fn host_linker_register_archive(path: u64) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     state.archives.push(path);
+    if state.trace_enabled {
+        let msg = format!("dustlink: trace: archive {}", as_string_or_number(path));
+        eprintln!("{msg}");
+    }
     set_last_error(&mut state, ERR_OK)
 }
 
@@ -6454,6 +6505,10 @@ pub extern "C" fn host_linker_push_state() -> u32 {
         link_new_dtags: state.link_new_dtags,
         link_copy_dt_needed_entries: state.link_copy_dt_needed_entries,
         no_undefined: state.no_undefined,
+        allow_shlib_undefined: state.allow_shlib_undefined,
+        unresolved_policy: state.unresolved_policy,
+        warn_unresolved: state.warn_unresolved,
+        trace_enabled: state.trace_enabled,
     };
     state.option_state_stack.push(snapshot);
     set_last_error(&mut state, ERR_OK)
@@ -6472,6 +6527,10 @@ pub extern "C" fn host_linker_pop_state() -> u32 {
     state.link_new_dtags = snapshot.link_new_dtags;
     state.link_copy_dt_needed_entries = snapshot.link_copy_dt_needed_entries;
     state.no_undefined = snapshot.no_undefined;
+    state.allow_shlib_undefined = snapshot.allow_shlib_undefined;
+    state.unresolved_policy = snapshot.unresolved_policy;
+    state.warn_unresolved = snapshot.warn_unresolved;
+    state.trace_enabled = snapshot.trace_enabled;
     set_last_error(&mut state, ERR_OK)
 }
 
@@ -6709,6 +6768,100 @@ pub extern "C" fn host_linker_get_no_undefined() -> u32 {
 }
 
 #[no_mangle]
+pub extern "C" fn host_linker_set_allow_shlib_undefined(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.allow_shlib_undefined = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_allow_shlib_undefined() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.allow_shlib_undefined { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_unresolved_policy(policy: u32) -> u32 {
+    if policy > UNRESOLVED_POLICY_IGNORE_IN_SHARED_LIBS {
+        return ERR_INVALID_FORMAT;
+    }
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.unresolved_policy = policy;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_unresolved_policy() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.unresolved_policy
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_warn_unresolved(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.warn_unresolved = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_warn_unresolved() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.warn_unresolved { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_set_trace(enabled: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    state.trace_enabled = enabled != 0;
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_get_trace() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    if state.trace_enabled { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_add_trace_symbol(name: u64) -> u32 {
+    let text = match read_c_string(name) {
+        Some(v) => v,
+        None => return ERR_INVALID_FORMAT,
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return ERR_INVALID_FORMAT;
+    }
+    let hash = fnv1a64(trimmed);
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    if !state.trace_symbol_hashes.contains(&hash) {
+        state.trace_symbol_hashes.push(hash);
+    }
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_emit_unresolved_warning(unresolved: u32, weak_fallbacks: u32) -> u32 {
+    let mut state = linker().lock().expect("linker mutex poisoned");
+    let mut policy_label = "report-all";
+    if state.unresolved_policy == UNRESOLVED_POLICY_IGNORE_ALL {
+        policy_label = "ignore-all";
+    } else if state.unresolved_policy == UNRESOLVED_POLICY_IGNORE_IN_OBJECT_FILES {
+        policy_label = "ignore-in-object-files";
+    } else if state.unresolved_policy == UNRESOLVED_POLICY_IGNORE_IN_SHARED_LIBS {
+        policy_label = "ignore-in-shared-libs";
+    }
+    eprintln!(
+        "dustlink: warning: unresolved symbols ignored by policy={} (unresolved={}, weak_fallbacks={})",
+        policy_label, unresolved, weak_fallbacks
+    );
+    if state.fatal_warnings {
+        return set_last_error(&mut state, ERR_UNDEFINED_SYMBOL);
+    }
+    set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
 pub extern "C" fn host_linker_allow_dynamic_unresolved() -> u32 {
     let state = linker().lock().expect("linker mutex poisoned");
     if state.no_undefined {
@@ -6717,10 +6870,10 @@ pub extern "C" fn host_linker_allow_dynamic_unresolved() -> u32 {
     if state.link_static {
         return 0;
     }
-    if state.needed_shared_libs.is_empty() {
-        return 0;
+    if state.link_shared {
+        return 1;
     }
-    1
+    0
 }
 
 #[no_mangle]
@@ -6767,7 +6920,20 @@ pub extern "C" fn host_linker_note_needed_library(requested: u64, resolved: u64,
     let preferred = preferred_needed_library_name_from_resolved(&resolved_text).unwrap_or(normalized);
     add_needed_library_if_missing(&mut state, &preferred);
     append_copy_dt_needed_entries(&mut state, &resolved_text);
+    if state.trace_enabled {
+        eprintln!(
+            "dustlink: trace: needed {} <- {}",
+            preferred,
+            resolved_text.trim()
+        );
+    }
     set_last_error(&mut state, ERR_OK)
+}
+
+#[no_mangle]
+pub extern "C" fn host_linker_shared_undefined_symbol_count() -> u32 {
+    let state = linker().lock().expect("linker mutex poisoned");
+    state.shared_undefined_symbols.len() as u32
 }
 
 #[no_mangle]
@@ -6879,8 +7045,15 @@ pub extern "C" fn host_linker_ingest_shared_object(path: u64) -> u32 {
         None => return ERR_FILE_NOT_FOUND,
     };
     let mut state = linker().lock().expect("linker mutex poisoned");
+    let unresolved_before = state.shared_undefined_symbols.len();
     let status = ingest_shared_object_symbols(&mut state, &p);
-    set_last_error(&mut state, status)
+    if status != ERR_OK {
+        return set_last_error(&mut state, status);
+    }
+    if !state.allow_shlib_undefined && state.shared_undefined_symbols.len() > unresolved_before {
+        return set_last_error(&mut state, ERR_UNDEFINED_SYMBOL);
+    }
+    set_last_error(&mut state, ERR_OK)
 }
 
 #[no_mangle]
@@ -7166,6 +7339,7 @@ pub extern "C" fn host_linker_global_symbol_count() -> u32 {
 #[no_mangle]
 pub extern "C" fn host_linker_global_symbol_define_absolute(name_hash: u64, value: u64) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
+    let trace_symbol_hit = state.trace_symbol_hashes.contains(&name_hash);
     state.globals.insert(
         name_hash,
         GlobalSymbol {
@@ -7176,6 +7350,12 @@ pub extern "C" fn host_linker_global_symbol_define_absolute(name_hash: u64, valu
             address: value,
         },
     );
+    if trace_symbol_hit {
+        eprintln!(
+            "dustlink: trace-symbol: hash=0x{:016x} abs=0x{:x}",
+            name_hash, value
+        );
+    }
     set_last_error(&mut state, ERR_OK)
 }
 
@@ -7189,6 +7369,7 @@ pub extern "C" fn host_linker_global_symbol_set(
 ) -> u32 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     let address = symbol_runtime_address(&state, object_index, symbol_index);
+    let trace_symbol_hit = state.trace_symbol_hashes.contains(&name_hash);
     state.globals.insert(
         name_hash,
         GlobalSymbol {
@@ -7199,6 +7380,12 @@ pub extern "C" fn host_linker_global_symbol_set(
             address,
         },
     );
+    if trace_symbol_hit {
+        eprintln!(
+            "dustlink: trace-symbol: hash=0x{:016x} obj={} sym={} addr=0x{:x}",
+            name_hash, object_index, symbol_index, address
+        );
+    }
     set_last_error(&mut state, ERR_OK)
 }
 
@@ -8045,6 +8232,10 @@ mod tests {
         assert_eq!(host_linker_set_new_dtags(1), ERR_OK);
         assert_eq!(host_linker_set_copy_dt_needed_entries(0), ERR_OK);
         assert_eq!(host_linker_set_no_undefined(0), ERR_OK);
+        assert_eq!(host_linker_set_allow_shlib_undefined(1), ERR_OK);
+        assert_eq!(host_linker_set_unresolved_policy(UNRESOLVED_POLICY_REPORT_ALL), ERR_OK);
+        assert_eq!(host_linker_set_warn_unresolved(0), ERR_OK);
+        assert_eq!(host_linker_set_trace(0), ERR_OK);
 
         assert_eq!(host_linker_push_state(), ERR_OK);
         assert_eq!(host_linker_set_static(1), ERR_OK);
@@ -8053,6 +8244,10 @@ mod tests {
         assert_eq!(host_linker_set_new_dtags(0), ERR_OK);
         assert_eq!(host_linker_set_copy_dt_needed_entries(1), ERR_OK);
         assert_eq!(host_linker_set_no_undefined(1), ERR_OK);
+        assert_eq!(host_linker_set_allow_shlib_undefined(0), ERR_OK);
+        assert_eq!(host_linker_set_unresolved_policy(UNRESOLVED_POLICY_IGNORE_ALL), ERR_OK);
+        assert_eq!(host_linker_set_warn_unresolved(1), ERR_OK);
+        assert_eq!(host_linker_set_trace(1), ERR_OK);
 
         assert_eq!(host_linker_pop_state(), ERR_OK);
         assert_eq!(host_linker_get_static(), 0);
@@ -8061,6 +8256,10 @@ mod tests {
         assert_eq!(host_linker_get_new_dtags(), 1);
         assert_eq!(host_linker_get_copy_dt_needed_entries(), 0);
         assert_eq!(host_linker_get_no_undefined(), 0);
+        assert_eq!(host_linker_get_allow_shlib_undefined(), 1);
+        assert_eq!(host_linker_get_unresolved_policy(), UNRESOLVED_POLICY_REPORT_ALL);
+        assert_eq!(host_linker_get_warn_unresolved(), 0);
+        assert_eq!(host_linker_get_trace(), 0);
     }
 
     #[test]
@@ -8072,6 +8271,13 @@ mod tests {
     #[test]
     fn z_option_muldefs_and_extended_compat_tokens_are_accepted() {
         assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_set_z_option(intern_string("defs")), ERR_OK);
+        assert_eq!(host_linker_get_no_undefined(), 1);
+        assert_eq!(host_linker_get_allow_shlib_undefined(), 0);
+        assert_eq!(host_linker_set_z_option(intern_string("undefs")), ERR_OK);
+        assert_eq!(host_linker_get_no_undefined(), 0);
+        assert_eq!(host_linker_get_allow_shlib_undefined(), 1);
+
         assert_eq!(host_linker_set_z_option(intern_string("muldefs")), ERR_OK);
         assert_eq!(host_linker_get_allow_multiple_definition(), 1);
         assert_eq!(host_linker_set_z_option(intern_string("nomuldefs")), ERR_OK);
@@ -8082,5 +8288,32 @@ mod tests {
         assert_eq!(host_linker_set_z_option(intern_string("max-page-size=0x1000")), ERR_OK);
         assert_eq!(host_linker_set_z_option(intern_string("common-page-size=0x1000")), ERR_OK);
         assert_eq!(host_linker_set_z_option(intern_string("stack-size=0x400000")), ERR_OK);
+    }
+
+    #[test]
+    fn dynamic_unresolved_gate_requires_shared_mode_and_non_strict_resolution() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        assert_eq!(host_linker_allow_dynamic_unresolved(), 0);
+        assert_eq!(host_linker_note_needed_library(intern_string("m"), intern_string("libm.so"), 1), ERR_OK);
+        // Presence of DT_NEEDED entries alone should not weaken unresolved checks for executable mode.
+        assert_eq!(host_linker_allow_dynamic_unresolved(), 0);
+
+        assert_eq!(host_linker_set_shared(1), ERR_OK);
+        assert_eq!(host_linker_allow_dynamic_unresolved(), 1);
+
+        assert_eq!(host_linker_set_no_undefined(1), ERR_OK);
+        assert_eq!(host_linker_allow_dynamic_unresolved(), 0);
+    }
+
+    #[test]
+    fn shared_undefined_symbol_tracking_is_deduplicated_and_queryable() {
+        assert_eq!(host_linker_reset_state(), ERR_OK);
+        {
+            let mut state = linker().lock().expect("linker mutex poisoned");
+            note_shared_undefined_symbol(&mut state, "puts");
+            note_shared_undefined_symbol(&mut state, "puts");
+            note_shared_undefined_symbol(&mut state, "malloc");
+        }
+        assert_eq!(host_linker_shared_undefined_symbol_count(), 2);
     }
 }
