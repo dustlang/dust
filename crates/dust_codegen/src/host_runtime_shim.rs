@@ -1519,7 +1519,7 @@ fn aarch64_tls_synth_reloc_value(
 }
 
 fn aarch64_tls_data_reloc_value(
-    state: &LinkerState,
+    state: &mut LinkerState,
     object_index: u32,
     symbol_index: u32,
     reloc_type: u32,
@@ -1549,11 +1549,11 @@ fn aarch64_tls_data_reloc_value(
 
                 // Return the GOT offset (8 bytes per slot)
                 // The actual module ID resolution happens via JUMP_SLOT-style dynamic reloc
-                let got_addr = state.tls_got_base.unwrap_or(0) + (got_slot as u64 * 8);
+                let got_addr = state.tls_got_base + (got_slot as u64 * 8);
                 // Return the offset from TP - but for shared objects we need GOT-relative
                 // For TLSDESC, this value gets used in the descriptor, so we return the GOT address
                 // The dynamic linker will patch this to be the actual module ID
-                Ok(got_addr)
+                return Ok(got_addr);
             }
             _ => return Err(ERR_INVALID_RELOCATION),
         }
@@ -1570,7 +1570,7 @@ fn aarch64_tls_data_reloc_value(
 }
 
 fn x86_64_tls_got_reloc_value(
-    state: &LinkerState,
+    state: &mut LinkerState,
     object_index: u32,
     symbol_index: u32,
     reloc_type: u32,
@@ -1591,7 +1591,7 @@ fn x86_64_tls_got_reloc_value(
                 .push((object_index, symbol_index, tls_offset_with_addend));
 
             // Get GOT address (synthesized .got.plt TLS region)
-            let got_addr = state.tls_got_base.unwrap_or(0) + (got_slot as u64 * 8);
+            let got_addr = state.tls_got_base + (got_slot as u64 * 8);
 
             // Return PC-relative offset to GOT entry
             let pcrel_offset = if got_addr >= place_addr {
@@ -1624,7 +1624,7 @@ fn x86_64_tls_got_reloc_value(
                     .tls_got_slots
                     .push((object_index, symbol_index, dtp_offset));
 
-                let got_addr = state.tls_got_base.unwrap_or(0) + (got_slot as u64 * 8);
+                let got_addr = state.tls_got_base + (got_slot as u64 * 8);
                 let pcrel_offset = if got_addr >= place_addr {
                     got_addr - place_addr
                 } else {
@@ -8363,7 +8363,7 @@ pub extern "C" fn host_linker_aarch64_tls_data_reloc_value(
 ) -> u64 {
     let mut state = linker().lock().expect("linker mutex poisoned");
     let result =
-        aarch64_tls_data_reloc_value(&state, object_index, symbol_index, reloc_type, addend);
+        aarch64_tls_data_reloc_value(&mut state, object_index, symbol_index, reloc_type, addend);
     match result {
         Ok(v) => {
             set_last_error(&mut state, ERR_OK);
@@ -8454,18 +8454,11 @@ pub extern "C" fn host_linker_x86_64_tls_got_reloc_value(
     place_addr: u64,
 ) -> u64 {
     let mut state = linker().lock().expect("linker mutex poisoned");
-    // Initialize TLS GOT base if not already set
+    // Initialize TLS GOT base if not already set.
+    // ObjectSection no longer carries named/addressed section metadata,
+    // so use the deterministic fallback base used by previous behavior.
     if state.tls_got_base == 0 {
-        // Allocate TLS GOT region after regular GOT
-        let got_end = state
-            .objects
-            .iter()
-            .flat_map(|o| o.sections.iter())
-            .filter(|s| s.name == ".got.plt")
-            .map(|s| s.address + s.size)
-            .max()
-            .unwrap_or(0x600000);
-        state.tls_got_base = got_end;
+        state.tls_got_base = 0x600000;
     }
     match x86_64_tls_got_reloc_value(
         &mut state,
