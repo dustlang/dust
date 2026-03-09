@@ -31,6 +31,7 @@ target-lexicon = { git = "https://github.com/dustsoftware/target-lexicon.git", r
 
 [patch.crates-io]
 ahash = { git = "https://github.com/dustsoftware/aHash.git", rev = "545a200b43fee2404c812d5d5c05c2734fb790bd" }
+aho-corasick = { git = "https://github.com/dustsoftware/aho-corasick.git", rev = "51a5ac1eb89d89084670e4b54741c03d9945835d" }
 anstyle = { git = "https://github.com/dustsoftware/anstyle.git", rev = "14dd743496d1614f8261a093ce755f26d8e2069d" }
 anyhow = { git = "https://github.com/dustsoftware/anyhow.git", rev = "5c657b32522023a9f7ef883fb08582fd8e656b1a" }
 arbitrary = { git = "https://github.com/dustsoftware/arbitrary.git", rev = "dc22fdefd5456a0f4d2f190c6d3e017e3c7ddd8e" }
@@ -73,7 +74,7 @@ serde_derive = { git = "https://github.com/dustsoftware/serde.git", rev = "a866b
 serde_json = { git = "https://github.com/dustsoftware/json.git", rev = "4f6dbfac79647d032b0997b5ab73022340c6dab7", package = "serde_json" }
 serde_spanned = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
 slice-group-by = { git = "https://github.com/dustsoftware/slice-group-by.git", rev = "668ee8146c494b26f4c0d279bfc8b7999a0f19b3" }
-smallvec = { git = "https://github.com/dustsoftware/smallvec.git", rev = "d0f47a3ea99296498ee940b5d99f59b403c498a2" }
+smallvec = { git = "https://github.com/dustsoftware/dust-smallvec.git", rev = "d0f47a3ea99296498ee940b5d99f59b403c498a2" }
 stable_deref_trait = { git = "https://github.com/dustsoftware/stable_deref_trait.git", rev = "30002b4228f7cdee309217b6bf6eee099dda0b00" }
 syn = { git = "https://github.com/dustsoftware/syn.git", rev = "7bcb37cdb3399977658c8b52d2441d37e42e48f2" }
 target-lexicon = { git = "https://github.com/dustsoftware/target-lexicon.git", rev = "7c80d459a9fdd121e9f23feb680c3db13c1baa39" }

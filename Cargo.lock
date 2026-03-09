@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "ahash"
 version = "0.8.10"
+source = "git+https://github.com/dustsoftware/aHash.git?rev=545a200b43fee2404c812d5d5c05c2734fb790bd#545a200b43fee2404c812d5d5c05c2734fb790bd"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -15,26 +16,32 @@ dependencies = [
 [[package]]
 name = "anstyle"
 version = "1.0.13"
+source = "git+https://github.com/dustsoftware/anstyle.git?rev=14dd743496d1614f8261a093ce755f26d8e2069d#14dd743496d1614f8261a093ce755f26d8e2069d"
 
 [[package]]
 name = "anyhow"
 version = "1.0.102"
+source = "git+https://github.com/dustsoftware/anyhow.git?rev=5c657b32522023a9f7ef883fb08582fd8e656b1a#5c657b32522023a9f7ef883fb08582fd8e656b1a"
 
 [[package]]
 name = "arbitrary"
 version = "1.4.2"
+source = "git+https://github.com/dustsoftware/arbitrary.git?rev=dc22fdefd5456a0f4d2f190c6d3e017e3c7ddd8e#dc22fdefd5456a0f4d2f190c6d3e017e3c7ddd8e"
 
 [[package]]
 name = "bumpalo"
 version = "3.20.2"
+source = "git+https://github.com/dustsoftware/bumpalo.git?rev=1aad072f93d8a4cf5885446ead554927c7c94f9c#1aad072f93d8a4cf5885446ead554927c7c94f9c"
 
 [[package]]
 name = "cfg-if"
 version = "1.0.4"
+source = "git+https://github.com/dustsoftware/cfg-if.git?rev=3510ca6abea34cbbc702509a4e50ea9709925eda#3510ca6abea34cbbc702509a4e50ea9709925eda"
 
 [[package]]
 name = "clap"
 version = "4.5.60"
+source = "git+https://github.com/dustsoftware/clap.git?rev=20aac9d46e0852292bd43d845b6d9cb69c598c9e#20aac9d46e0852292bd43d845b6d9cb69c598c9e"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -43,6 +50,7 @@ dependencies = [
 [[package]]
 name = "clap_builder"
 version = "4.5.60"
+source = "git+https://github.com/dustsoftware/clap.git?rev=20aac9d46e0852292bd43d845b6d9cb69c598c9e#20aac9d46e0852292bd43d845b6d9cb69c598c9e"
 dependencies = [
  "anstyle",
  "clap_lex",
@@ -51,6 +59,7 @@ dependencies = [
 [[package]]
 name = "clap_derive"
 version = "4.5.55"
+source = "git+https://github.com/dustsoftware/clap.git?rev=20aac9d46e0852292bd43d845b6d9cb69c598c9e#20aac9d46e0852292bd43d845b6d9cb69c598c9e"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -61,10 +70,12 @@ dependencies = [
 [[package]]
 name = "clap_lex"
 version = "1.0.0"
+source = "git+https://github.com/dustsoftware/clap.git?rev=20aac9d46e0852292bd43d845b6d9cb69c598c9e#20aac9d46e0852292bd43d845b6d9cb69c598c9e"
 
 [[package]]
 name = "cranelift-bforest"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 dependencies = [
  "cranelift-entity",
 ]
@@ -72,10 +83,12 @@ dependencies = [
 [[package]]
 name = "cranelift-bitset"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 
 [[package]]
 name = "cranelift-codegen"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 dependencies = [
  "bumpalo",
  "cranelift-bforest",
@@ -86,7 +99,7 @@ dependencies = [
  "cranelift-entity",
  "cranelift-isle",
  "gimli",
- "hashbrown",
+ "hashbrown 0.14.5",
  "log",
  "regalloc2",
  "rustc-hash",
@@ -97,6 +110,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-meta"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 dependencies = [
  "cranelift-codegen-shared",
 ]
@@ -104,10 +118,12 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-shared"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 
 [[package]]
 name = "cranelift-control"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 dependencies = [
  "arbitrary",
 ]
@@ -115,6 +131,7 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 dependencies = [
  "cranelift-bitset",
 ]
@@ -122,6 +139,7 @@ dependencies = [
 [[package]]
 name = "cranelift-frontend"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 dependencies = [
  "cranelift-codegen",
  "log",
@@ -132,10 +150,12 @@ dependencies = [
 [[package]]
 name = "cranelift-isle"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 
 [[package]]
 name = "cranelift-module"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 dependencies = [
  "anyhow",
  "cranelift-codegen",
@@ -145,6 +165,7 @@ dependencies = [
 [[package]]
 name = "cranelift-object"
 version = "0.110.3"
+source = "git+https://github.com/dustsoftware/wasmtime.git?rev=72bedc12e00084fdf49f7d4f5d40b979c184b0a5#72bedc12e00084fdf49f7d4f5d40b979c184b0a5"
 dependencies = [
  "anyhow",
  "cranelift-codegen",
@@ -158,6 +179,7 @@ dependencies = [
 [[package]]
 name = "crc32fast"
 version = "1.5.0"
+source = "git+https://github.com/dustsoftware/dust-crc32fast.git?rev=dbf4f76cd71cdcc57d9164cbd46890d53ce0423c#dbf4f76cd71cdcc57d9164cbd46890d53ce0423c"
 dependencies = [
  "cfg-if",
 ]
@@ -217,14 +239,24 @@ dependencies = [
 [[package]]
 name = "equivalent"
 version = "1.0.2"
+source = "git+https://github.com/dustsoftware/equivalent.git?rev=44cdd44f8b8ebb5f9ae096c7550a5e74ffb7d6ae#44cdd44f8b8ebb5f9ae096c7550a5e74ffb7d6ae"
 
 [[package]]
 name = "fallible-iterator"
 version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "gimli"
-version = "0.32.3"
+version = "0.28.1"
+source = "git+https://github.com/dustsoftware/gimli.git?rev=ee0262aff054b87270072a5ea9b254177edcc80f#ee0262aff054b87270072a5ea9b254177edcc80f"
 dependencies = [
  "fallible-iterator",
  "indexmap",
@@ -233,41 +265,63 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.14.5"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43a3c133739dddd0d2990f9a4bdf8eb4b21ef50e4851ca85ab661199821d510e"
 dependencies = [
  "ahash",
 ]
 
 [[package]]
+name = "hashbrown"
+version = "0.14.5"
+source = "git+https://github.com/dustsoftware/hashbrown.git?rev=025d0f58b62d074f5fd660a22fe293cdc237d589#025d0f58b62d074f5fd660a22fe293cdc237d589"
+
+[[package]]
+name = "hashbrown"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
+dependencies = [
+ "foldhash",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
+source = "git+https://github.com/dustsoftware/heck.git?rev=252c1906cefefb8d13ecad7fce7b8f27ce6437e0#252c1906cefefb8d13ecad7fce7b8f27ce6437e0"
 
 [[package]]
 name = "indexmap"
 version = "2.5.0"
+source = "git+https://github.com/dustsoftware/indexmap.git?rev=48ed49017c9af536bda2916c78e77b619163a2f2#48ed49017c9af536bda2916c78e77b619163a2f2"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.14.5",
 ]
 
 [[package]]
 name = "itoa"
 version = "1.0.17"
+source = "git+https://github.com/dustsoftware/itoa.git?rev=21d610902fb79eb16b7c155d25574fb7376d9e97#21d610902fb79eb16b7c155d25574fb7376d9e97"
 
 [[package]]
 name = "log"
 version = "0.4.29"
+source = "git+https://github.com/dustsoftware/log.git?rev=b1e2df7bce7a1b685aa9bfd1db0a5cac1f0fc27d#b1e2df7bce7a1b685aa9bfd1db0a5cac1f0fc27d"
 
 [[package]]
 name = "memchr"
 version = "2.8.0"
+source = "git+https://github.com/dustsoftware/memchr.git?rev=886ca4ca4820297191c6e9f7b023dc356f31a4d1#886ca4ca4820297191c6e9f7b023dc356f31a4d1"
 
 [[package]]
 name = "object"
 version = "0.36.7"
+source = "git+https://github.com/dustsoftware/object.git?rev=5b66b69298f6198f9d5b5bb2a0b284b4d920a92c#5b66b69298f6198f9d5b5bb2a0b284b4d920a92c"
 dependencies = [
  "crc32fast",
- "hashbrown",
+ "hashbrown 0.15.5",
  "indexmap",
  "memchr",
 ]
@@ -275,10 +329,12 @@ dependencies = [
 [[package]]
 name = "once_cell"
 version = "1.21.3"
+source = "git+https://github.com/dustsoftware/once_cell.git?rev=29e3d93cf0367fc6c295785b282b8101127a3e16#29e3d93cf0367fc6c295785b282b8101127a3e16"
 
 [[package]]
 name = "proc-macro2"
 version = "1.0.106"
+source = "git+https://github.com/dustsoftware/proc-macro2.git?rev=58ab776b95a4c2865554badbb6629c50971a9118#58ab776b95a4c2865554badbb6629c50971a9118"
 dependencies = [
  "unicode-ident",
 ]
@@ -286,6 +342,7 @@ dependencies = [
 [[package]]
 name = "quote"
 version = "1.0.44"
+source = "git+https://github.com/dustsoftware/quote.git?rev=ad9fb4019efc3f34e5d3b9be416199937f7a8ee3#ad9fb4019efc3f34e5d3b9be416199937f7a8ee3"
 dependencies = [
  "proc-macro2",
 ]
@@ -293,8 +350,9 @@ dependencies = [
 [[package]]
 name = "regalloc2"
 version = "0.9.3"
+source = "git+https://github.com/dustsoftware/regalloc2.git?rev=4777ec92df3b4e6f5f354af462f254630b70641e#4777ec92df3b4e6f5f354af462f254630b70641e"
 dependencies = [
- "hashbrown",
+ "hashbrown 0.13.2",
  "log",
  "rustc-hash",
  "slice-group-by",
@@ -304,10 +362,12 @@ dependencies = [
 [[package]]
 name = "rustc-hash"
 version = "1.2.0"
+source = "git+https://github.com/dustsoftware/dustc-hash.git?rev=0773e83fddff56670e107134dbd9f12e6b6ecdf4#0773e83fddff56670e107134dbd9f12e6b6ecdf4"
 
 [[package]]
 name = "same-file"
 version = "1.0.6"
+source = "git+https://github.com/dustsoftware/same-file.git?rev=5799cd323b8eefd17a089c950dac113f66c89c9e#5799cd323b8eefd17a089c950dac113f66c89c9e"
 dependencies = [
  "winapi-util",
 ]
@@ -315,6 +375,7 @@ dependencies = [
 [[package]]
 name = "serde"
 version = "1.0.228"
+source = "git+https://github.com/dustsoftware/serde.git?rev=a866b336f14aa57a07f0d0be9f8762746e64ecb4#a866b336f14aa57a07f0d0be9f8762746e64ecb4"
 dependencies = [
  "serde_core",
  "serde_derive",
@@ -323,6 +384,7 @@ dependencies = [
 [[package]]
 name = "serde_core"
 version = "1.0.228"
+source = "git+https://github.com/dustsoftware/serde.git?rev=a866b336f14aa57a07f0d0be9f8762746e64ecb4#a866b336f14aa57a07f0d0be9f8762746e64ecb4"
 dependencies = [
  "serde_derive",
 ]
@@ -330,6 +392,7 @@ dependencies = [
 [[package]]
 name = "serde_derive"
 version = "1.0.228"
+source = "git+https://github.com/dustsoftware/serde.git?rev=a866b336f14aa57a07f0d0be9f8762746e64ecb4#a866b336f14aa57a07f0d0be9f8762746e64ecb4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -339,6 +402,7 @@ dependencies = [
 [[package]]
 name = "serde_json"
 version = "1.0.149"
+source = "git+https://github.com/dustsoftware/json.git?rev=4f6dbfac79647d032b0997b5ab73022340c6dab7#4f6dbfac79647d032b0997b5ab73022340c6dab7"
 dependencies = [
  "itoa",
  "memchr",
@@ -350,6 +414,7 @@ dependencies = [
 [[package]]
 name = "serde_spanned"
 version = "0.6.9"
+source = "git+https://github.com/dustsoftware/toml.git?rev=838a0223142a2137b530e020cb7231aba46f7946#838a0223142a2137b530e020cb7231aba46f7946"
 dependencies = [
  "serde",
 ]
@@ -357,18 +422,22 @@ dependencies = [
 [[package]]
 name = "slice-group-by"
 version = "0.3.1"
+source = "git+https://github.com/dustsoftware/slice-group-by.git?rev=668ee8146c494b26f4c0d279bfc8b7999a0f19b3#668ee8146c494b26f4c0d279bfc8b7999a0f19b3"
 
 [[package]]
 name = "smallvec"
 version = "1.15.1"
+source = "git+https://github.com/dustsoftware/dust-smallvec.git?rev=d0f47a3ea99296498ee940b5d99f59b403c498a2#d0f47a3ea99296498ee940b5d99f59b403c498a2"
 
 [[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
+source = "git+https://github.com/dustsoftware/stable_deref_trait.git?rev=30002b4228f7cdee309217b6bf6eee099dda0b00#30002b4228f7cdee309217b6bf6eee099dda0b00"
 
 [[package]]
 name = "syn"
 version = "2.0.117"
+source = "git+https://github.com/dustsoftware/syn.git?rev=7bcb37cdb3399977658c8b52d2441d37e42e48f2#7bcb37cdb3399977658c8b52d2441d37e42e48f2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -378,10 +447,12 @@ dependencies = [
 [[package]]
 name = "target-lexicon"
 version = "0.12.16"
+source = "git+https://github.com/dustsoftware/target-lexicon.git?rev=7c80d459a9fdd121e9f23feb680c3db13c1baa39#7c80d459a9fdd121e9f23feb680c3db13c1baa39"
 
 [[package]]
 name = "thiserror"
 version = "1.0.69"
+source = "git+https://github.com/dustsoftware/thiserror.git?rev=41938bd3a03a70d34ed8e53d99c89c770c7c9c41#41938bd3a03a70d34ed8e53d99c89c770c7c9c41"
 dependencies = [
  "thiserror-impl",
 ]
@@ -389,6 +460,7 @@ dependencies = [
 [[package]]
 name = "thiserror-impl"
 version = "1.0.69"
+source = "git+https://github.com/dustsoftware/thiserror.git?rev=41938bd3a03a70d34ed8e53d99c89c770c7c9c41#41938bd3a03a70d34ed8e53d99c89c770c7c9c41"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -398,6 +470,7 @@ dependencies = [
 [[package]]
 name = "toml"
 version = "0.8.23"
+source = "git+https://github.com/dustsoftware/toml.git?rev=838a0223142a2137b530e020cb7231aba46f7946#838a0223142a2137b530e020cb7231aba46f7946"
 dependencies = [
  "serde",
  "serde_spanned",
@@ -408,6 +481,7 @@ dependencies = [
 [[package]]
 name = "toml_datetime"
 version = "0.6.11"
+source = "git+https://github.com/dustsoftware/toml.git?rev=838a0223142a2137b530e020cb7231aba46f7946#838a0223142a2137b530e020cb7231aba46f7946"
 dependencies = [
  "serde",
 ]
@@ -415,6 +489,7 @@ dependencies = [
 [[package]]
 name = "toml_edit"
 version = "0.22.27"
+source = "git+https://github.com/dustsoftware/toml.git?rev=838a0223142a2137b530e020cb7231aba46f7946#838a0223142a2137b530e020cb7231aba46f7946"
 dependencies = [
  "indexmap",
  "serde",
@@ -427,18 +502,22 @@ dependencies = [
 [[package]]
 name = "toml_write"
 version = "0.1.2"
+source = "git+https://github.com/dustsoftware/toml.git?rev=838a0223142a2137b530e020cb7231aba46f7946#838a0223142a2137b530e020cb7231aba46f7946"
 
 [[package]]
 name = "unicode-ident"
 version = "1.0.24"
+source = "git+https://github.com/dustsoftware/unicode-ident.git?rev=5b54a632702b5744a1c40ea01c127c0ac0498172#5b54a632702b5744a1c40ea01c127c0ac0498172"
 
 [[package]]
 name = "version_check"
 version = "0.9.5"
+source = "git+https://github.com/dustsoftware/version_check.git?rev=d77ef9f27cc336719b2d839d09ee6635dd22f758#d77ef9f27cc336719b2d839d09ee6635dd22f758"
 
 [[package]]
 name = "walkdir"
 version = "2.5.0"
+source = "git+https://github.com/dustsoftware/walkdir.git?rev=4f26be4d450910916ea11533b2efc52b9a6483bc#4f26be4d450910916ea11533b2efc52b9a6483bc"
 dependencies = [
  "same-file",
  "winapi-util",
@@ -447,6 +526,7 @@ dependencies = [
 [[package]]
 name = "winapi-util"
 version = "0.1.10"
+source = "git+https://github.com/dustsoftware/winapi-util.git?rev=29a804c1a048429a4c35fd2c3f6b82f8495159df#29a804c1a048429a4c35fd2c3f6b82f8495159df"
 dependencies = [
  "windows-sys",
 ]
@@ -454,31 +534,104 @@ dependencies = [
 [[package]]
 name = "windows-link"
 version = "0.2.1"
+source = "git+https://github.com/dustsoftware/windows-ds.git?rev=d5939330cea022cf15bf2f2d0ec87ff97f108f03#d5939330cea022cf15bf2f2d0ec87ff97f108f03"
 
 [[package]]
 name = "windows-sys"
-version = "0.61.2"
+version = "0.60.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2f500e4d28234f72040990ec9d39e3a6b950f9f22d3dba18416c35882612bcb"
+dependencies = [
+ "windows-targets",
+]
+
+[[package]]
+name = "windows-targets"
+version = "0.53.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4945f9f551b88e0d65f3db0bc25c33b8acea4d9e41163edf90dcd0b19f9069f3"
 dependencies = [
  "windows-link",
+ "windows_aarch64_gnullvm",
+ "windows_aarch64_msvc",
+ "windows_i686_gnu",
+ "windows_i686_gnullvm",
+ "windows_i686_msvc",
+ "windows_x86_64_gnu",
+ "windows_x86_64_gnullvm",
+ "windows_x86_64_msvc",
 ]
+
+[[package]]
+name = "windows_aarch64_gnullvm"
+version = "0.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9d8416fa8b42f5c947f8482c43e7d89e73a173cead56d044f6a56104a6d1b53"
+
+[[package]]
+name = "windows_aarch64_msvc"
+version = "0.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9d782e804c2f632e395708e99a94275910eb9100b2114651e04744e9b125006"
+
+[[package]]
+name = "windows_i686_gnu"
+version = "0.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "960e6da069d81e09becb0ca57a65220ddff016ff2d6af6a223cf372a506593a3"
+
+[[package]]
+name = "windows_i686_gnullvm"
+version = "0.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa7359d10048f68ab8b09fa71c3daccfb0e9b559aed648a8f95469c27057180c"
+
+[[package]]
+name = "windows_i686_msvc"
+version = "0.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e7ac75179f18232fe9c285163565a57ef8d3c89254a30685b57d83a38d326c2"
+
+[[package]]
+name = "windows_x86_64_gnu"
+version = "0.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c3842cdd74a865a8066ab39c8a7a473c0778a3f29370b5fd6b4b9aa7df4a499"
+
+[[package]]
+name = "windows_x86_64_gnullvm"
+version = "0.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ffa179e2d07eee8ad8f57493436566c7cc30ac536a3379fdf008f47f6bb7ae1"
+
+[[package]]
+name = "windows_x86_64_msvc"
+version = "0.53.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winnow"
 version = "0.7.14"
+source = "git+https://github.com/dustsoftware/winnow.git?rev=faa62149eb96a07878bf66515c19af84df158c07#faa62149eb96a07878bf66515c19af84df158c07"
 dependencies = [
  "memchr",
 ]
 
 [[package]]
 name = "zerocopy"
-version = "0.8.39"
+version = "0.7.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.39"
+version = "0.7.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -488,3 +641,24 @@ dependencies = [
 [[package]]
 name = "zmij"
 version = "1.0.19"
+source = "git+https://github.com/dustsoftware/zmij.git?rev=990ad7ec835af798afdebc4361a346775227953b#990ad7ec835af798afdebc4361a346775227953b"
+
+[[patch.unused]]
+name = "aho-corasick"
+version = "1.1.4"
+source = "git+https://github.com/dustsoftware/aho-corasick.git?rev=51a5ac1eb89d89084670e4b54741c03d9945835d#51a5ac1eb89d89084670e4b54741c03d9945835d"
+
+[[patch.unused]]
+name = "windows-sys"
+version = "0.61.2"
+source = "git+https://github.com/dustsoftware/windows-ds.git?rev=d5939330cea022cf15bf2f2d0ec87ff97f108f03#d5939330cea022cf15bf2f2d0ec87ff97f108f03"
+
+[[patch.unused]]
+name = "zerocopy"
+version = "0.8.39"
+source = "git+https://github.com/dustsoftware/zerocopy.git?rev=e85ea41a646885f291902e707bee68215f88aa3b#e85ea41a646885f291902e707bee68215f88aa3b"
+
+[[patch.unused]]
+name = "zerocopy-derive"
+version = "0.8.39"
+source = "git+https://github.com/dustsoftware/zerocopy.git?rev=e85ea41a646885f291902e707bee68215f88aa3b#e85ea41a646885f291902e707bee68215f88aa3b"
