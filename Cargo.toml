@@ -84,7 +84,7 @@ toml = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a21
 toml_datetime = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
 toml_edit = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
 toml_write = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
-unicode-ident = { git = "https://github.com/dustsoftware/unicode-ident.git", rev = "5b54a632702b5744a1c40ea01c127c0ac0498172" }
+unicode-ident = { git = "https://github.com/dustsoftware/unicode-ident.git", rev = "f9d942cc12fe8ef4d5c8ba25253bf5e919df9720" }
 version_check = { git = "https://github.com/dustsoftware/version_check.git", rev = "d77ef9f27cc336719b2d839d09ee6635dd22f758" }
 walkdir = { git = "https://github.com/dustsoftware/walkdir.git", rev = "4f26be4d450910916ea11533b2efc52b9a6483bc" }
 winapi-util = { git = "https://github.com/dustsoftware/winapi-util.git", rev = "29a804c1a048429a4c35fd2c3f6b82f8495159df" }
