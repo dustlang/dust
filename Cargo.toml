@@ -15,18 +15,84 @@ authors = ["Dust LLC"]
 license-file = "LICENSE"
 
 [workspace.dependencies]
-anyhow = { git = "https://github.com/dustsoftware/anyhow.git", rev = "80bfe291b16071c70f141e90e67e7032d966826b" }
+anyhow = { git = "https://github.com/dustsoftware/anyhow.git", rev = "5c657b32522023a9f7ef883fb08582fd8e656b1a" }
 thiserror = { git = "https://github.com/dustsoftware/thiserror.git", rev = "41938bd3a03a70d34ed8e53d99c89c770c7c9c41" }
+serde = { git = "https://github.com/dustsoftware/serde.git", rev = "a866b336f14aa57a07f0d0be9f8762746e64ecb4", features = ["derive"] }
+serde_json = { git = "https://github.com/dustsoftware/json.git", rev = "4f6dbfac79647d032b0997b5ab73022340c6dab7", package = "serde_json" }
+clap = { git = "https://github.com/dustsoftware/clap.git", rev = "20aac9d46e0852292bd43d845b6d9cb69c598c9e", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+toml = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
+walkdir = { git = "https://github.com/dustsoftware/walkdir.git", rev = "4f26be4d450910916ea11533b2efc52b9a6483bc" }
 
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+cranelift-codegen = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5", default-features = false, features = ["std", "x86", "host-arch"] }
+cranelift-module = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5", default-features = false, features = ["std"] }
+cranelift-object = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-frontend = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5", default-features = false, features = ["std"] }
+target-lexicon = { git = "https://github.com/dustsoftware/target-lexicon.git", rev = "7c80d459a9fdd121e9f23feb680c3db13c1baa39" }
 
-cranelift-codegen = "0.110"
-cranelift-module = "0.110"
-cranelift-object = "0.110"
-cranelift-frontend = "0.110"
-
-target-lexicon = "0.12"
+[patch.crates-io]
+ahash = { git = "https://github.com/dustsoftware/aHash.git", rev = "545a200b43fee2404c812d5d5c05c2734fb790bd" }
+anstyle = { git = "https://github.com/dustsoftware/anstyle.git", rev = "14dd743496d1614f8261a093ce755f26d8e2069d" }
+anyhow = { git = "https://github.com/dustsoftware/anyhow.git", rev = "5c657b32522023a9f7ef883fb08582fd8e656b1a" }
+arbitrary = { git = "https://github.com/dustsoftware/arbitrary.git", rev = "dc22fdefd5456a0f4d2f190c6d3e017e3c7ddd8e" }
+bumpalo = { git = "https://github.com/dustsoftware/bumpalo.git", rev = "1aad072f93d8a4cf5885446ead554927c7c94f9c" }
+cfg-if = { git = "https://github.com/dustsoftware/cfg-if.git", rev = "3510ca6abea34cbbc702509a4e50ea9709925eda" }
+clap = { git = "https://github.com/dustsoftware/clap.git", rev = "20aac9d46e0852292bd43d845b6d9cb69c598c9e" }
+clap_builder = { git = "https://github.com/dustsoftware/clap.git", rev = "20aac9d46e0852292bd43d845b6d9cb69c598c9e" }
+clap_derive = { git = "https://github.com/dustsoftware/clap.git", rev = "20aac9d46e0852292bd43d845b6d9cb69c598c9e" }
+clap_lex = { git = "https://github.com/dustsoftware/clap.git", rev = "20aac9d46e0852292bd43d845b6d9cb69c598c9e" }
+cranelift-bforest = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-bitset = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-codegen = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-codegen-meta = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-codegen-shared = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-control = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-entity = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-frontend = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-isle = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-module = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+cranelift-object = { git = "https://github.com/dustsoftware/wasmtime.git", rev = "72bedc12e00084fdf49f7d4f5d40b979c184b0a5" }
+crc32fast = { git = "https://github.com/dustsoftware/dust-crc32fast.git", rev = "dbf4f76cd71cdcc57d9164cbd46890d53ce0423c" }
+equivalent = { git = "https://github.com/dustsoftware/equivalent.git", rev = "44cdd44f8b8ebb5f9ae096c7550a5e74ffb7d6ae" }
+gimli = { git = "https://github.com/dustsoftware/gimli.git", rev = "ee0262aff054b87270072a5ea9b254177edcc80f" }
+hashbrown = { git = "https://github.com/dustsoftware/hashbrown.git", rev = "025d0f58b62d074f5fd660a22fe293cdc237d589" }
+heck = { git = "https://github.com/dustsoftware/heck.git", rev = "252c1906cefefb8d13ecad7fce7b8f27ce6437e0" }
+indexmap = { git = "https://github.com/dustsoftware/indexmap.git", rev = "48ed49017c9af536bda2916c78e77b619163a2f2" }
+itoa = { git = "https://github.com/dustsoftware/itoa.git", rev = "21d610902fb79eb16b7c155d25574fb7376d9e97" }
+log = { git = "https://github.com/dustsoftware/log.git", rev = "b1e2df7bce7a1b685aa9bfd1db0a5cac1f0fc27d" }
+memchr = { git = "https://github.com/dustsoftware/memchr.git", rev = "886ca4ca4820297191c6e9f7b023dc356f31a4d1" }
+object = { git = "https://github.com/dustsoftware/object.git", rev = "5b66b69298f6198f9d5b5bb2a0b284b4d920a92c" }
+once_cell = { git = "https://github.com/dustsoftware/once_cell.git", rev = "29e3d93cf0367fc6c295785b282b8101127a3e16" }
+proc-macro2 = { git = "https://github.com/dustsoftware/proc-macro2.git", rev = "58ab776b95a4c2865554badbb6629c50971a9118" }
+quote = { git = "https://github.com/dustsoftware/quote.git", rev = "ad9fb4019efc3f34e5d3b9be416199937f7a8ee3" }
+regalloc2 = { git = "https://github.com/dustsoftware/regalloc2.git", rev = "4777ec92df3b4e6f5f354af462f254630b70641e" }
+rustc-hash = { git = "https://github.com/dustsoftware/dustc-hash.git", rev = "0773e83fddff56670e107134dbd9f12e6b6ecdf4" }
+same-file = { git = "https://github.com/dustsoftware/same-file.git", rev = "5799cd323b8eefd17a089c950dac113f66c89c9e" }
+serde = { git = "https://github.com/dustsoftware/serde.git", rev = "a866b336f14aa57a07f0d0be9f8762746e64ecb4" }
+serde_core = { git = "https://github.com/dustsoftware/serde.git", rev = "a866b336f14aa57a07f0d0be9f8762746e64ecb4" }
+serde_derive = { git = "https://github.com/dustsoftware/serde.git", rev = "a866b336f14aa57a07f0d0be9f8762746e64ecb4" }
+serde_json = { git = "https://github.com/dustsoftware/json.git", rev = "4f6dbfac79647d032b0997b5ab73022340c6dab7", package = "serde_json" }
+serde_spanned = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
+slice-group-by = { git = "https://github.com/dustsoftware/slice-group-by.git", rev = "668ee8146c494b26f4c0d279bfc8b7999a0f19b3" }
+smallvec = { git = "https://github.com/dustsoftware/smallvec.git", rev = "d0f47a3ea99296498ee940b5d99f59b403c498a2" }
+stable_deref_trait = { git = "https://github.com/dustsoftware/stable_deref_trait.git", rev = "30002b4228f7cdee309217b6bf6eee099dda0b00" }
+syn = { git = "https://github.com/dustsoftware/syn.git", rev = "7bcb37cdb3399977658c8b52d2441d37e42e48f2" }
+target-lexicon = { git = "https://github.com/dustsoftware/target-lexicon.git", rev = "7c80d459a9fdd121e9f23feb680c3db13c1baa39" }
+thiserror = { git = "https://github.com/dustsoftware/thiserror.git", rev = "41938bd3a03a70d34ed8e53d99c89c770c7c9c41" }
+thiserror-impl = { git = "https://github.com/dustsoftware/thiserror.git", rev = "41938bd3a03a70d34ed8e53d99c89c770c7c9c41" }
+toml = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
+toml_datetime = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
+toml_edit = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
+toml_write = { git = "https://github.com/dustsoftware/toml.git", rev = "838a0223142a2137b530e020cb7231aba46f7946" }
+unicode-ident = { git = "https://github.com/dustsoftware/unicode-ident.git", rev = "5b54a632702b5744a1c40ea01c127c0ac0498172" }
+version_check = { git = "https://github.com/dustsoftware/version_check.git", rev = "d77ef9f27cc336719b2d839d09ee6635dd22f758" }
+walkdir = { git = "https://github.com/dustsoftware/walkdir.git", rev = "4f26be4d450910916ea11533b2efc52b9a6483bc" }
+winapi-util = { git = "https://github.com/dustsoftware/winapi-util.git", rev = "29a804c1a048429a4c35fd2c3f6b82f8495159df" }
+windows-link = { git = "https://github.com/dustsoftware/windows-ds.git", rev = "d5939330cea022cf15bf2f2d0ec87ff97f108f03" }
+windows-sys = { git = "https://github.com/dustsoftware/windows-ds.git", rev = "d5939330cea022cf15bf2f2d0ec87ff97f108f03" }
+winnow = { git = "https://github.com/dustsoftware/winnow.git", rev = "faa62149eb96a07878bf66515c19af84df158c07" }
+zerocopy = { git = "https://github.com/dustsoftware/zerocopy.git", rev = "e85ea41a646885f291902e707bee68215f88aa3b" }
+zerocopy-derive = { git = "https://github.com/dustsoftware/zerocopy.git", rev = "e85ea41a646885f291902e707bee68215f88aa3b" }
+zmij = { git = "https://github.com/dustsoftware/zmij.git", rev = "990ad7ec835af798afdebc4361a346775227953b" }
 
 [profile.dev]
 opt-level = 0
