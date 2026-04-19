@@ -43,17 +43,27 @@ pub fn generate() {
 /// Returns the actual executable path (normalized for Windows .exe).
 pub fn build_executable(dir: &DirProgram, out_path: &Path) -> Result<PathBuf> {
     let exe_path = normalize_exe_path(out_path);
+    let is_dustlink = is_dustlink_bootstrap_target(&exe_path);
     let obj_bytes = build_host_object_from_dir(dir, "main")?;
 
-    // Write object next to output and link
+    // Write object next to output
     let obj_path = write_object_temp(&exe_path, &obj_bytes)?;
-    let host_runtime_lib = compile_host_runtime_library(&exe_path)?;
-    let link_inputs = vec![obj_path.clone(), host_runtime_lib.clone()];
-    link_executable(&link_inputs, &exe_path)?;
+
+    if is_dustlink {
+        // dustlink provides its own host runtime shim (hostlinker_shim.c).
+        // Skip the Rust shim and let the system linker resolve host_* symbols
+        // from dustlink's own C shim during the link step.
+        let link_inputs = vec![obj_path.clone()];
+        link_executable(&link_inputs, &exe_path)?;
+    } else {
+        let host_runtime_lib = compile_host_runtime_library(&exe_path)?;
+        let link_inputs = vec![obj_path.clone(), host_runtime_lib.clone()];
+        link_executable(&link_inputs, &exe_path)?;
+        let _ = fs::remove_file(&host_runtime_lib);
+    }
 
     // Best-effort cleanup
     let _ = fs::remove_file(&obj_path);
-    let _ = fs::remove_file(&host_runtime_lib);
 
     Ok(exe_path)
 }
@@ -1472,13 +1482,83 @@ fn link_unix(
     _is_macos: bool,
     bootstrap_dustlink: bool,
 ) -> Result<()> {
-    if link_inputs.is_empty() {
+    if link_inputs.is_empty() && !bootstrap_dustlink {
         bail!("link_unix called without input objects/libraries");
     }
-    let inputs = link_inputs
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect::<Vec<_>>();
+
+    // For dustlink bootstrap: compile the C shim and add it to link inputs
+    let mut inputs: Vec<String>;
+    let c_shim_obj: Option<PathBuf> = if bootstrap_dustlink {
+        // Find dustlink's hostlinker_shim.c relative to the exe_path
+        let exe_dir = exe_path.parent().unwrap_or(Path::new("."));
+        let shim_src = exe_dir.join("..").join("src").join("hostlinker_shim.c");
+        let shim_obj = exe_dir.join("hostlinker_shim.o");
+        if shim_src.is_file() {
+            let status = std::process::Command::new("cc")
+                .arg("-Wall")
+                .arg("-Wno-unused-function")
+                .arg("-Wno-unused-parameter")
+                .arg("-Wno-sign-compare")
+                .arg("-fPIC")
+                .arg("-O2")
+                .arg("-c")
+                .arg(&shim_src)
+                .arg("-o")
+                .arg(&shim_obj)
+                .status()
+                .with_context(|| format!("compile C shim {}", shim_src.display()))?;
+            if !status.success() {
+                bail!("failed to compile C host runtime shim {}", shim_src.display());
+            }
+            inputs = link_inputs
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            inputs.push(shim_obj.to_string_lossy().to_string());
+            Some(shim_obj)
+        } else {
+            // Try to find it in the dustlink repo relative to the current workspace
+            let alt_shim = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../dustlink/src/hostlinker_shim.c");
+            let alt_shim_obj = exe_dir.join("hostlinker_shim.o");
+            if alt_shim.is_file() {
+                let status = std::process::Command::new("cc")
+                    .arg("-Wall")
+                    .arg("-Wno-unused-function")
+                    .arg("-Wno-unused-parameter")
+                    .arg("-Wno-sign-compare")
+                    .arg("-O2")
+                    .arg("-c")
+                    .arg(&alt_shim)
+                    .arg("-o")
+                    .arg(&alt_shim_obj)
+                    .status()
+                    .with_context(|| format!("compile C shim {}", alt_shim.display()))?;
+                if !status.success() {
+                    bail!("failed to compile C host runtime shim {}", alt_shim.display());
+                }
+                inputs = link_inputs
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
+                inputs.push(alt_shim_obj.to_string_lossy().to_string());
+                Some(alt_shim_obj)
+            } else {
+                inputs = link_inputs
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
+                None
+            }
+        }
+    } else {
+        inputs = link_inputs
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        None
+    };
+
     let exe = exe_path.to_string_lossy().to_string();
 
     let mut attempts: Vec<LinkAttempt> = Vec::new();
@@ -1548,7 +1628,14 @@ fn link_unix(
         note: "driver-default",
     });
 
-    run_link_attempts(attempts)
+    let result = run_link_attempts(attempts);
+
+    // Clean up C shim object
+    if let Some(obj) = c_shim_obj {
+        let _ = fs::remove_file(&obj);
+    }
+
+    result
 }
 
 fn link_windows(link_inputs: &[PathBuf], exe_path: &Path, bootstrap_dustlink: bool) -> Result<()> {
